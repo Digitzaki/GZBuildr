@@ -11,7 +11,7 @@ A GUI tool for parsing, extracting, and rebuilding Wii/GameCube/PS2 bundle files
 - **.BDP** - PS2 bundle files
 - **.VOL** - PS2 VOL format (experimental, view only)
 
-## Requirements
+## Requirements (Should come with .exe)
 
 ### Python
 - Python 3.x
