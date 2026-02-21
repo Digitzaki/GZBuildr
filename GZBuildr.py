@@ -16,13 +16,22 @@ To enable drag-and-drop functionality, install:
 
 If not installed, you can still use the Browse button to select files.
 """
+import ctypes
+
+try:
+    ctypes.windll.shcore.SetProcessDpiAwareness(2)  # Per-monitor DPI aware
+except Exception:
+    try:
+        ctypes.windll.user32.SetProcessDPIAware()
+    except Exception:
+        pass
 
 import tkinter as tk
 from tkinter import ttk, filedialog, scrolledtext, messagebox
 import struct
 import os
 import shutil
-
+    
 # Try to import drag-and-drop library
 HAS_DND = False
 
@@ -1100,12 +1109,10 @@ class ExtractWindow:
 
         self.window = tk.Toplevel(parent)
         self.window.title("Extract Files")
-        self.window.geometry("700x700")
-        self.window.transient(parent)
+        self.window.geometry("800x600")
+        self.window.resizable(True, True)
+        self.window.minsize(600, 400)
         # Remove grab_set() to allow non-modal behavior
-
-        # Bring window to front when clicked
-        self.window.bind("<FocusIn>", lambda e: self.window.lift())
 
         main_frame = ttk.Frame(self.window, padding="10")
         main_frame.pack(fill=tk.BOTH, expand=True)
@@ -1402,7 +1409,7 @@ class ExtractWindow:
             return
 
         # Ask for output directory
-        output_dir = filedialog.askdirectory(title="Select Output Directory")
+        output_dir = filedialog.askdirectory(parent=self.window, title="Select Output Directory")
         if not output_dir:
             return
 
@@ -1435,20 +1442,22 @@ class RebuildWindow:
         self.parsed_files = parsed_files
         self.parser = parser
         self.output_text_callback = output_text_callback
+        self.build_from_scratch = (parsed_files is None or parser is None)
 
         self.window = tk.Toplevel(parent)
-        self.window.title("Rebuild Bundle")
-        self.window.geometry("700x500")
-        self.window.transient(parent)
-
-        # Bring window to front when clicked
-        self.window.bind("<FocusIn>", lambda e: self.window.lift())
+        self.window.title("Build Bundle from Directory" if self.build_from_scratch else "Rebuild Bundle")
+        self.window.geometry("800x700")
+        self.window.resizable(True, True)
+        self.window.minsize(600, 400)
 
         main_frame = ttk.Frame(self.window, padding="10")
         main_frame.pack(fill=tk.BOTH, expand=True)
 
         # Instructions
-        instructions = ttk.Label(main_frame, text="Select the directory containing replacement files and output location:")
+        if self.build_from_scratch:
+            instructions = ttk.Label(main_frame, text="Build a new bundle from a directory of files:")
+        else:
+            instructions = ttk.Label(main_frame, text="Select the directory containing replacement files and output location:")
         instructions.pack(anchor=tk.W, pady=(0, 10))
 
         # Replacement directory section
@@ -1655,7 +1664,7 @@ class RebuildWindow:
 
     def browse_replacement_dir(self):
         """Browse for replacement files directory"""
-        directory = filedialog.askdirectory(title="Select Directory with Replacement Files")
+        directory = filedialog.askdirectory(parent=self.window, title="Select Directory with Replacement Files")
         if directory:
             self.repl_dir_var.set(directory)
             self.status_text.insert(tk.END, f"Replacement directory: {directory}\n")
@@ -1663,6 +1672,7 @@ class RebuildWindow:
     def browse_output_file(self):
         """Browse for output bundle file location"""
         filepath = filedialog.asksaveasfilename(
+            parent=self.window,
             title="Save Rebuilt Bundle As",
             defaultextension=".BDG",
             filetypes=[
@@ -1691,6 +1701,11 @@ class RebuildWindow:
 
         if not output_path:
             messagebox.showwarning("Missing Input", "Please select an output file location.")
+            return
+
+        # Check if building from scratch
+        if self.build_from_scratch:
+            self.build_from_directory(replacement_dir, output_path)
             return
 
         # Get custom alignment values from dropdowns
@@ -1730,6 +1745,136 @@ class RebuildWindow:
             self.status_text.insert(tk.END, "✗ Failed to rebuild bundle file.\n")
             self.output_text_callback("Failed to rebuild bundle file.\n")
 
+    def build_from_directory(self, source_dir, output_path):
+        """Build a new VOL bundle from directory without needing a parsed file"""
+        self.status_text.insert(tk.END, f"\n=== Building New VOL Bundle ===\n")
+        self.status_text.insert(tk.END, f"Source directory: {source_dir}\n")
+        self.status_text.update()
+
+        try:
+            # Scan directory for files
+            file_list = []
+            for root, dirs, files in os.walk(source_dir):
+                for filename in files:
+                    filepath = os.path.join(root, filename)
+
+                    with open(filepath, 'rb') as f:
+                        data = f.read()
+
+                    # Store only base filename (all files on root)
+                    file_list.append({
+                        'name': filename,
+                        'data': data,
+                        'size': len(data)
+                    })
+
+            if not file_list:
+                messagebox.showerror("Error", "No files found in directory!")
+                return
+
+            # Sort files alphabetically by name
+            file_list.sort(key=lambda x: x['name'].lower())
+
+            self.status_text.insert(tk.END, f"Found {len(file_list)} files (sorted alphabetically)\n")
+
+            # Build VOL structure
+            file_count = len(file_list)
+
+            # Calculate offsets
+            header_size = 16
+            toc_size = file_count * 0xC
+            string_offset_table_size = file_count * 4
+
+            # Build string table
+            string_data = bytearray()
+            string_offsets = []
+            for file_info in file_list:
+                string_offsets.append(len(string_data))
+                # Store filename as-is (already just the base filename)
+                string_data.extend(file_info['name'].encode('ascii') + b'\x00')
+
+            # String table starts after header + TOC + offset table + 4-byte size field
+            string_table_start = header_size + toc_size + string_offset_table_size + 4
+            string_table_end = string_table_start + len(string_data)
+
+            # Align data start to 0x800 (2048 bytes)
+            data_start = ((string_table_end + 0x7FF) // 0x800) * 0x800
+            padding_before_data = data_start - string_table_end
+
+            # Calculate file offsets with 16-byte alignment
+            file_offsets = []
+            current_offset = data_start
+            for file_info in file_list:
+                file_offsets.append(current_offset)
+                current_offset += file_info['size']
+                # Align to next 16-byte boundary with minimum 16 bytes padding
+                padding = (16 - (current_offset % 16)) % 16
+                if padding == 0:
+                    padding = 16
+                current_offset += padding
+
+            # Build the VOL file
+            output_data = bytearray()
+
+            # Header
+            output_data.extend(b'PVOL')
+            output_data.extend(struct.pack('<I', 0x1001))
+            output_data.extend(struct.pack('<I', file_count))
+            output_data.extend(struct.pack('<I', string_table_end))
+
+            # TOC
+            for i, file_info in enumerate(file_list):
+                output_data.extend(struct.pack('<I', file_offsets[i]))
+                output_data.extend(struct.pack('<I', file_info['size']))
+                output_data.extend(struct.pack('<I', i))  # File ID
+
+            # String offset table
+            for offset in string_offsets:
+                output_data.extend(struct.pack('<I', offset))
+
+            # String section size
+            output_data.extend(struct.pack('<I', len(string_data)))
+
+            # String data
+            output_data.extend(string_data)
+
+            # Padding before data
+            output_data.extend(b'\xFF' * padding_before_data)
+
+            # File data
+            for i, file_info in enumerate(file_list):
+                output_data.extend(file_info['data'])
+
+                # Add padding between files
+                if i < len(file_list) - 1:
+                    current_pos = len(output_data)
+                    padding = (16 - (current_pos % 16)) % 16
+                    if padding == 0:
+                        padding = 16
+                    output_data.extend(b'\xFF' * padding)
+
+            # Final padding
+            current_pos = len(output_data)
+            padding = (16 - (current_pos % 16)) % 16
+            output_data.extend(b'\xFF' * (padding + 16))
+
+            # Write file
+            with open(output_path, 'wb') as f:
+                f.write(output_data)
+
+            self.status_text.insert(tk.END, f"\n✓ VOL bundle created successfully!\n")
+            self.status_text.insert(tk.END, f"Output: {output_path}\n")
+            self.status_text.insert(tk.END, f"Size: {len(output_data)} bytes\n")
+
+            messagebox.showinfo("Success", f"VOL bundle created successfully!\n\nOutput: {output_path}")
+            self.output_text_callback(f"\nVOL bundle created successfully: {output_path}\n")
+
+        except Exception as e:
+            self.status_text.insert(tk.END, f"\n✗ Error creating VOL bundle: {e}\n")
+            messagebox.showerror("Error", f"Failed to create VOL bundle:\n{e}")
+            import traceback
+            traceback.print_exc()
+
     def destroy(self):
         """Destroy window"""
         self.window.destroy()
@@ -1749,7 +1894,8 @@ class PipeworksGUI:
         self.root.protocol("WM_DELETE_WINDOW", self.on_main_window_close)
 
         # Bring main window to front when clicked
-        self.root.bind("<FocusIn>", lambda e: self.root.lift())
+        self.root.after(100, self.root.lift)
+        self.root.after(100, self.root.focus_force)
 
         # Configure style
         style = ttk.Style()
@@ -1784,13 +1930,10 @@ class PipeworksGUI:
         button_frame = ttk.Frame(main_frame)
         button_frame.grid(row=1, column=0, pady=(0, 10))
 
-        parse_btn = ttk.Button(button_frame, text="Parse File", command=self.parse_file)
-        parse_btn.pack(side=tk.LEFT, padx=(0, 5))
-
         self.extract_btn = ttk.Button(button_frame, text="Extract", command=self.extract_files, state=tk.DISABLED)
         self.extract_btn.pack(side=tk.LEFT, padx=(0, 5))
 
-        self.rebuild_btn = ttk.Button(button_frame, text="Rebuild", command=self.rebuild_bdg, state=tk.DISABLED)
+        self.rebuild_btn = ttk.Button(button_frame, text="Rebuild", command=self.rebuild_bdg)
         self.rebuild_btn.pack(side=tk.LEFT)
 
         # Output section
@@ -1869,6 +2012,8 @@ class PipeworksGUI:
                 self.file_entry.configure(state='readonly')
                 self.output_text.insert(tk.END, f"File loaded via drag-drop: {filepath}\n")
                 print(f"File dropped: {filepath}")
+                # Auto-parse the file
+                self.parse_file()
             else:
                 self.output_text.insert(tk.END, f"Invalid file path: {filepath}\n")
                 print(f"Invalid file path from drop: {filepath}")
@@ -1881,6 +2026,7 @@ class PipeworksGUI:
     def browse_file(self):
         """Open file dialog to select a file"""
         filename = filedialog.askopenfilename(
+            parent=self.root,
             title="Select Bundle File",
             filetypes=[
                 ("Bundle Files", "*.BDG *.cmg *.cmp *.clp *.bdp *.VOL"),
@@ -1895,6 +2041,8 @@ class PipeworksGUI:
         )
         if filename:
             self.file_path_var.set(filename)
+            # Auto-parse the file
+            self.parse_file()
 
     def parse_file(self):
         """Parse the selected file and display results"""
@@ -1952,9 +2100,8 @@ class PipeworksGUI:
             self.output_text.insert(tk.END, "\n")
             self.output_text.insert(tk.END, f"Total entries: {len(results)}\n")
 
-            # Enable extract and rebuild buttons
+            # Enable extract button (rebuild is always enabled)
             self.extract_btn.config(state=tk.NORMAL)
-            self.rebuild_btn.config(state=tk.NORMAL)
 
     def extract_files(self):
         """Open extraction window"""
@@ -1980,16 +2127,18 @@ class PipeworksGUI:
 
     def rebuild_bdg(self):
         """Open rebuild window"""
-        if not self.parsed_files or not self.parser:
-            messagebox.showwarning("No Data", "Please parse a file first.")
-            return
-
         # Create callback for window to update main output
         def output_callback(text):
             self.output_text.insert(tk.END, text)
 
-        # Create non-modal rebuild window
-        window = RebuildWindow(self.root, self.parsed_files, self.parser, output_callback)
+        # Allow opening rebuild window even without parsed files
+        # If no parsed files, it will build from scratch
+        if self.parsed_files and self.parser:
+            window = RebuildWindow(self.root, self.parsed_files, self.parser, output_callback)
+        else:
+            # Build from scratch mode (no parsed files)
+            window = RebuildWindow(self.root, None, None, output_callback)
+
         self.child_windows.append(window.window)
 
         # Remove from list when window is closed
