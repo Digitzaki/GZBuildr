@@ -246,44 +246,53 @@ class PipeworksParser:
             return [{"error": f"Error parsing file: {str(e)}"}]
 
     def parse_vol(self):
-        """Parse VOL bundle file (PS2 format)"""
+        """Parse VOL bundle file (PS2 format) - based on VOL_Extract.BMS"""
         results = []
 
         try:
             # VOL files are always little-endian (PS2)
             self.is_big_endian = False
 
-            # Read header
-            # 0x00: "PVOL" signature (already verified)
+            # Read 16-byte header (matching BMS script exactly)
+            # 0x00-03: Magic "PVOL"
+            # 0x04-07: UNK
+            # 0x08-0B: FILES count
+            # 0x0C-0F: DATASTART (in BMS, but value meaning unclear)
             unk = struct.unpack('<I', self.file_data[4:8])[0]
             self.file_count = struct.unpack('<I', self.file_data[8:12])[0]
-            self.main_data_offset = struct.unpack('<I', self.file_data[12:16])[0]
+            datastart_field = struct.unpack('<I', self.file_data[12:16])[0]
 
-            # Calculate string table offset
-            # TOC structure: 0xC bytes per entry (offset, size, file_id) + 4 bytes per file_id + 20 byte header
-            self.string_offset = (0xC * self.file_count) + (4 * self.file_count) + 20
+            # Calculate string table offset (matching BMS exactly)
+            # BMS formula: NAMEOFF = (0xC * FILES) + (4 * FILES) + 20
+            # This accounts for: 16-byte header + TOC (12 bytes per file) + extra data (4 bytes per file) + 4 bytes
+            self.string_offset = (12 * self.file_count) + (4 * self.file_count) + 20
 
-            # Start parsing TOC at 0x14 (20 bytes)
-            toc_offset = 20
+            print(f"\n=== VOL Header ===")
+            print(f"File count: {self.file_count}")
+            print(f"DATASTART field: 0x{datastart_field:08X} ({datastart_field})")
+            print(f"String table offset (calculated): 0x{self.string_offset:08X} ({self.string_offset})")
 
-            # First pass: read TOC entries
-            # Entry structure: OFFSET (4), SIZE (4), FILE_ID (4)
+            # Start parsing TOC at offset 16 (after 16-byte header)
+            toc_offset = 16
+
+            # Read TOC entries (matching BMS exactly: OFFSET, SIZE, FID)
             toc_entries = []
             for i in range(self.file_count):
                 entry_offset = toc_offset + (i * 0xC)
 
-                offset = struct.unpack('<I', self.file_data[entry_offset:entry_offset + 4])[0]
+                file_offset = struct.unpack('<I', self.file_data[entry_offset:entry_offset + 4])[0]
                 size = struct.unpack('<I', self.file_data[entry_offset + 4:entry_offset + 8])[0]
                 file_id = struct.unpack('<I', self.file_data[entry_offset + 8:entry_offset + 12])[0]
 
                 toc_entries.append({
-                    'offset': offset,
+                    'offset': file_offset,
                     'size': size,
                     'file_id': file_id,
-                    'toc_entry_offset': entry_offset
+                    'toc_entry_offset': entry_offset,
+                    'raw_offset': file_offset
                 })
 
-            # Second pass: read file names from string table
+            # Read file names from string table
             name_offset = self.string_offset
             for i, entry in enumerate(toc_entries):
                 # Read null-terminated string
@@ -291,17 +300,27 @@ class PipeworksParser:
                 while name_end < len(self.file_data) and self.file_data[name_end] != 0:
                     name_end += 1
 
-                name = self.file_data[name_offset:name_end].decode('ascii', errors='ignore')
+                raw_name = self.file_data[name_offset:name_end].decode('ascii', errors='ignore')
 
                 # Detect file type from extension
-                file_type = self.detect_file_type_from_extension(name)
+                file_type = self.detect_file_type_from_extension(raw_name)
+
+                # Create folder-based structure for VOL files
+                # Extract folder path and filename from the original name
+                if '/' in raw_name or '\\' in raw_name:
+                    # Already has folder structure
+                    folder_name = raw_name.replace('\\', '/')
+                else:
+                    # Group by extension for flat files
+                    ext = raw_name.split('.')[-1].upper() if '.' in raw_name else 'MISC'
+                    folder_name = f"{ext}/{raw_name}"
 
                 results.append({
                     "file_num": i,
-                    "name": name,
-                    "offset": entry['offset'],
+                    "name": folder_name,
+                    "offset": entry['offset'],  # Absolute offset for extraction
                     "size": entry['size'],
-                    "raw_offset": entry['offset'],
+                    "raw_offset": entry['raw_offset'],  # Relative offset for rebuild
                     "toc_entry_offset": entry['toc_entry_offset'],
                     "is_resource": False,
                     "file_type": file_type,
@@ -870,19 +889,15 @@ class PipeworksParser:
             return False
 
     def rebuild_vol(self, output_vol_path, file_entries, replacement_dir):
-        """Rebuild VOL file with replaced files"""
+        """Rebuild VOL file with replaced files - based on VOL_Extract.BMS structure"""
         try:
-            # VOL files are simple: no alignment, no resource files, no size restrictions
-            new_data = bytearray()
-
             # Get all files
             all_files = self.parse()
 
             print(f"\nRebuilding VOL with {len(all_files)} files...")
 
-            # Collect file data and track offsets
+            # Collect file data and track info
             file_data_list = []
-            total_size = 0
 
             for entry in all_files:
                 # Look for replacement file
@@ -902,48 +917,151 @@ class PipeworksParser:
                     file_data = self.read_bytes(entry['offset'], entry['size'])
                     print(f"  File {entry['file_num']} ({entry['name']}): Using original, size {len(file_data)}")
 
+                # Strip folder prefix from name when storing in VOL
+                # VOL stores just the filename, not the folder structure we added
+                original_name = entry['name']
+                if '/' in original_name:
+                    # Get just the filename part
+                    stored_name = original_name.split('/')[-1]
+                else:
+                    stored_name = original_name
+
                 file_data_list.append({
                     'data': file_data,
-                    'name': entry['name'],
+                    'name': stored_name,
                     'file_id': entry.get('file_id', entry['file_num'])
                 })
-                total_size += len(file_data)
 
-            # Calculate offsets
-            header_size = 20
+            # Calculate offsets - VOL structure:
+            # 1. Header: 16 bytes
+            # 2. TOC: 12 bytes per file (offset, size, fid)
+            # 3. String offset table: 4 bytes per file
+            # 4. 4-byte gap (0x00000000)
+            # 5. String table: null-terminated strings
+            # 6. Padding (0xFF bytes) to align file data
+            # 7. File data
+
+            header_size = 16
             toc_size = len(file_data_list) * 0xC
-            data_start = header_size + toc_size
+            string_offset_table_size = len(file_data_list) * 4
 
-            # Build header
+            # String table starts after: header + TOC + string offset table + 4 bytes
+            # This matches BMS formula: (12 * FILES) + (4 * FILES) + 20
+            string_table_start = header_size + toc_size + string_offset_table_size + 4
+
+            # Extract ORIGINAL string offset table and string data to preserve exact structure
+            # The string offset table has special values that must be preserved
+            original_string_offset_table_start = 16 + (len(file_data_list) * 12)
+            original_string_offset_table_size = len(file_data_list) * 4
+            original_string_offset_table = self.file_data[original_string_offset_table_start:original_string_offset_table_start + original_string_offset_table_size]
+
+            # Extract original string data (starts after offset table + 4-byte size field)
+            original_string_data_start = (12 * len(file_data_list)) + (4 * len(file_data_list)) + 20
+            original_datastart = struct.unpack('<I', self.file_data[0x0C:0x10])[0]
+            original_string_data_size = original_datastart - original_string_data_start
+            string_table_data = bytearray(self.file_data[original_string_data_start:original_datastart])
+
+            # String table end (this is the DATASTART value)
+            string_table_end = string_table_start + len(string_table_data)
+
+            # Get original alignment from first file offset
+            original_first_file_offset = struct.unpack('<I', self.file_data[16:20])[0]
+
+            # Use original alignment if possible, otherwise align to nearest power of 2
+            if original_first_file_offset >= string_table_end:
+                # Use original offset as data_start
+                data_start = original_first_file_offset
+            else:
+                # Calculate alignment (common values: 0x100, 0x200, 0x400, 0x800, 0x1000)
+                for align in [0x1000, 0x800, 0x400, 0x200, 0x100, 0x80, 0x40, 0x20]:
+                    aligned = ((string_table_end + align - 1) // align) * align
+                    if aligned >= string_table_end:
+                        data_start = aligned
+                        break
+                else:
+                    data_start = string_table_end
+
+            padding_before_data = data_start - string_table_end
+
+            # Build output
+            new_data = bytearray()
+
+            # Build header (16 bytes):
+            # 0x00-03: Magic "PVOL"
+            # 0x04-07: UNK (0x1001)
+            # 0x08-0B: FILES count
+            # 0x0C-0F: DATASTART (end of string table)
             new_data.extend(b'PVOL')
-            new_data.extend(struct.pack('<I', 0))  # Unknown field
-            new_data.extend(struct.pack('<I', len(file_data_list)))  # File count
-            new_data.extend(struct.pack('<I', data_start))  # Data start offset
-            new_data.extend(struct.pack('<I', 0))  # Padding/unknown
+            new_data.extend(struct.pack('<I', 0x1001))  # UNK
+            new_data.extend(struct.pack('<I', len(file_data_list)))  # FILES
+            new_data.extend(struct.pack('<I', string_table_end))  # DATASTART = string table end
 
-            # Build TOC
-            current_offset = data_start
+            # Build TOC (12 bytes per file: OFFSET, SIZE, FID)
+            # Pre-calculate all file offsets with 16-byte alignment (last hex digit is 0)
+            file_offsets = []
+            current_file_offset = data_start
             for file_info in file_data_list:
-                new_data.extend(struct.pack('<I', current_offset))  # Offset
-                new_data.extend(struct.pack('<I', len(file_info['data'])))  # Size
-                new_data.extend(struct.pack('<I', file_info['file_id']))  # File ID
-                current_offset += len(file_info['data'])
+                file_offsets.append(current_file_offset)
+                # Move to next file
+                current_file_offset += len(file_info['data'])
+                # Align to NEXT 16-byte boundary, with minimum 16 bytes padding
+                # If already aligned, add 16; otherwise add padding to reach next boundary
+                padding = (16 - (current_file_offset % 16)) % 16
+                if padding == 0:
+                    padding = 16  # Minimum gap of 16 bytes
+                current_file_offset += padding
 
-            # Add file data
-            for file_info in file_data_list:
-                new_data.extend(file_info['data'])
+            # Write TOC
+            for i, file_info in enumerate(file_data_list):
+                new_data.extend(struct.pack('<I', file_offsets[i]))  # OFFSET (absolute)
+                new_data.extend(struct.pack('<I', len(file_info['data'])))  # SIZE
+                new_data.extend(struct.pack('<I', file_info['file_id']))  # FID
+
+            # Write ORIGINAL string offset table (preserve exact values)
+            new_data.extend(original_string_offset_table)
+
+            # Extract and preserve ORIGINAL string section size field
+            original_size_field_pos = 16 + (len(file_data_list) * 12) + (len(file_data_list) * 4)
+            original_string_section_size = struct.unpack('<I', self.file_data[original_size_field_pos:original_size_field_pos+4])[0]
+            new_data.extend(struct.pack('<I', original_string_section_size))
 
             # Add string table
-            for file_info in file_data_list:
-                new_data.extend(file_info['name'].encode('ascii'))
-                new_data.extend(b'\x00')  # Null terminator
+            new_data.extend(string_table_data)
+
+            # Add padding to align file data section (use 0xFF like original)
+            new_data.extend(b'\xFF' * padding_before_data)
+
+            # Add file data with 16-byte alignment between files (last hex digit = 0)
+            for i, file_info in enumerate(file_data_list):
+                new_data.extend(file_info['data'])
+
+                # Add 0xFF padding - minimum 16 bytes between files (except for last file)
+                if i < len(file_data_list) - 1:
+                    current_pos = len(new_data)
+                    padding = (16 - (current_pos % 16)) % 16
+                    if padding == 0:
+                        padding = 16  # Minimum gap of 16 bytes
+                    new_data.extend(b'\xFF' * padding)
+
+            # Add padding at end - align to 16 bytes then add 16 more bytes (total 16-32 bytes)
+            current_pos = len(new_data)
+            padding = (16 - (current_pos % 16)) % 16
+            new_data.extend(b'\xFF' * (padding + 16))
 
             # Write output file
             with open(output_vol_path, 'wb') as f:
                 f.write(new_data)
 
-            print(f"\nSuccessfully rebuilt VOL: {output_vol_path}")
-            print(f"Total size: {len(new_data)} bytes ({len(file_data_list)} files)")
+            print(f"\n✓ VOL rebuilt successfully: {output_vol_path}")
+            print(f"  Total size: {len(new_data)} bytes")
+            print(f"  Files: {len(file_data_list)}")
+            print(f"  Header: {header_size} bytes (0x00-0x0F)")
+            print(f"  TOC: {toc_size} bytes (0x10-0x{15 + toc_size:X})")
+            print(f"  String offset table: {string_offset_table_size} bytes (0x{16 + toc_size:X}-0x{15 + toc_size + string_offset_table_size:X})")
+            print(f"  String table: {len(string_table_data)} bytes at 0x{string_table_start:X}")
+            print(f"  String table ends (DATASTART): 0x{string_table_end:X}")
+            print(f"  Padding: {padding_before_data} bytes (0xFF)")
+            print(f"  File data start: 0x{data_start:X}")
             return True
 
         except Exception as e:
@@ -1054,13 +1172,25 @@ class ExtractWindow:
         self.cleanup_bindings = cleanup_bindings
         self.window.protocol("WM_DELETE_WINDOW", lambda: (cleanup_bindings(), self.window.destroy()))
 
-        # Group files by type
+        # Group files by type (or extension for VOL files)
         self.files_by_type = {}
+        self.is_vol = parser.bundle_type == 'vol'
+
         for entry in file_entries:
-            file_type = entry.get('file_type', 0)
-            if file_type not in self.files_by_type:
-                self.files_by_type[file_type] = []
-            self.files_by_type[file_type].append(entry)
+            if self.is_vol:
+                # For VOL files, group by extension (extract from folder path)
+                name = entry['name']
+                if '/' in name:
+                    group_key = name.split('/')[0]  # e.g., "CNF", "OVL", "ICN"
+                else:
+                    group_key = 'NO_EXTENSION'
+            else:
+                # For Pipeworks bundles, group by file_type number
+                group_key = entry.get('file_type', 0)
+
+            if group_key not in self.files_by_type:
+                self.files_by_type[group_key] = []
+            self.files_by_type[group_key].append(entry)
 
         # Store checkboxes and category state
         self.check_vars = {}
@@ -1069,10 +1199,27 @@ class ExtractWindow:
         self.category_frames = {}
         self.category_content_frames = {}
 
-        # Create collapsible sections for each file type
-        for file_type in sorted(self.files_by_type.keys()):
-            entries = self.files_by_type[file_type]
-            type_name = self.FILE_TYPE_NAMES.get(file_type, f"Unknown Type {file_type}")
+        # Create collapsible sections for each file type/extension
+        # Sort by extension name (alphabetically) for VOL, or by type number for Pipeworks
+        if self.is_vol:
+            sorted_keys = sorted(self.files_by_type.keys(), key=lambda x: str(x).lower())
+        else:
+            sorted_keys = sorted(self.files_by_type.keys())
+
+        for group_key in sorted_keys:
+            entries = self.files_by_type[group_key]
+
+            # Generate appropriate label based on bundle type
+            if self.is_vol:
+                # For VOL files, show extension name
+                if group_key == 'NO_EXTENSION':
+                    title_text = f"{group_key} ({len(entries)} files)"
+                else:
+                    title_text = f"{group_key} ({len(entries)} files)"
+            else:
+                # For Pipeworks bundles, show type number and name
+                type_name = self.FILE_TYPE_NAMES.get(group_key, f"Unknown Type {group_key}")
+                title_text = f"Type {group_key}: {type_name} ({len(entries)} files)"
 
             # Category container
             category_container = ttk.Frame(scrollable_frame)
@@ -1083,35 +1230,35 @@ class ExtractWindow:
             header_frame.pack(fill=tk.X)
 
             # Track expansion state
-            self.category_expanded[file_type] = False
+            self.category_expanded[group_key] = False
 
             # Arrow and label
             arrow_label = ttk.Label(header_frame, text="▶", width=2)
             arrow_label.pack(side=tk.LEFT, padx=(5, 0))
 
-            title_label = ttk.Label(header_frame, text=f"Type {file_type}: {type_name} ({len(entries)} files)")
+            title_label = ttk.Label(header_frame, text=title_text)
             title_label.pack(side=tk.LEFT, pady=5)
 
             # Category select all checkbox
             category_var = tk.BooleanVar(value=False)
-            self.category_vars[file_type] = category_var
+            self.category_vars[group_key] = category_var
 
             # Content frame (hidden by default)
             content_frame = ttk.Frame(category_container)
-            self.category_content_frames[file_type] = content_frame
-            self.category_frames[file_type] = {
+            self.category_content_frames[group_key] = content_frame
+            self.category_frames[group_key] = {
                 'arrow': arrow_label,
                 'content': content_frame,
                 'loaded': False
             }
 
             # Make header clickable
-            def make_toggle(ft, arrow, content):
+            def make_toggle(gk, arrow, content):
                 def toggle(event=None):
-                    self.toggle_category_expand(ft, arrow, content)
+                    self.toggle_category_expand(gk, arrow, content)
                 return toggle
 
-            toggle_func = make_toggle(file_type, arrow_label, content_frame)
+            toggle_func = make_toggle(group_key, arrow_label, content_frame)
             header_frame.bind("<Button-1>", toggle_func)
             arrow_label.bind("<Button-1>", toggle_func)
             title_label.bind("<Button-1>", toggle_func)
@@ -1137,49 +1284,49 @@ class ExtractWindow:
         extract_btn = ttk.Button(button_frame, text="Extract Selected", command=self.extract)
         extract_btn.pack(side=tk.RIGHT, padx=(5, 0))
 
-    def toggle_category_expand(self, file_type, arrow_label, content_frame):
+    def toggle_category_expand(self, group_key, arrow_label, content_frame):
         """Expand or collapse a category"""
-        is_expanded = self.category_expanded[file_type]
+        is_expanded = self.category_expanded[group_key]
 
         if is_expanded:
             # Collapse
             content_frame.pack_forget()
             arrow_label.config(text="▶")
-            self.category_expanded[file_type] = False
+            self.category_expanded[group_key] = False
         else:
             # Expand
             content_frame.pack(fill=tk.X, padx=10, pady=5)
             arrow_label.config(text="▼")
-            self.category_expanded[file_type] = True
+            self.category_expanded[group_key] = True
 
             # Lazy load checkboxes if not already loaded
-            if not self.category_frames[file_type]['loaded']:
-                self.load_category_files(file_type, content_frame)
-                self.category_frames[file_type]['loaded'] = True
+            if not self.category_frames[group_key]['loaded']:
+                self.load_category_files(group_key, content_frame)
+                self.category_frames[group_key]['loaded'] = True
 
-    def load_category_files(self, file_type, content_frame):
+    def load_category_files(self, group_key, content_frame):
         """Lazy load file checkboxes for a category"""
-        entries = self.files_by_type[file_type]
+        entries = self.files_by_type[group_key]
 
         # Select all checkbox
-        category_var = self.category_vars[file_type]
+        category_var = self.category_vars[group_key]
         category_cb = ttk.Checkbutton(
             content_frame,
             text="Select All in Category",
             variable=category_var,
-            command=lambda: self.toggle_category_selection(file_type)
+            command=lambda: self.toggle_category_selection(group_key)
         )
         category_cb.pack(anchor=tk.W, pady=(0, 5))
 
         # Initialize check_vars dict for this category
-        if file_type not in self.check_vars:
-            self.check_vars[file_type] = []
+        if group_key not in self.check_vars:
+            self.check_vars[group_key] = []
 
         # Individual file checkboxes
         for entry in entries:
             var = tk.BooleanVar(value=False)
             var.trace_add('write', lambda *args: self.update_selection_count())
-            self.check_vars[file_type].append((var, entry))
+            self.check_vars[group_key].append((var, entry))
 
             # Extract just filename without folder
             display_name = entry['name'].split('/')[-1] if '/' in entry['name'] else entry['name']
@@ -1194,59 +1341,59 @@ class ExtractWindow:
     def update_selection_count(self):
         """Update the status label with current selection count"""
         count = 0
-        for file_type in self.check_vars:
-            for var, entry in self.check_vars[file_type]:
+        for group_key in self.check_vars:
+            for var, entry in self.check_vars[group_key]:
                 if var.get():
                     count += 1
         self.status_label.config(text=f"{count} / {self.total_files} files selected")
 
-    def toggle_category_selection(self, file_type):
+    def toggle_category_selection(self, group_key):
         """Toggle all files in a category"""
-        state = self.category_vars[file_type].get()
-        if file_type in self.check_vars:
-            for var, entry in self.check_vars[file_type]:
+        state = self.category_vars[group_key].get()
+        if group_key in self.check_vars:
+            for var, entry in self.check_vars[group_key]:
                 var.set(state)
 
     def expand_all(self):
         """Expand all categories"""
-        for file_type in self.category_frames:
-            if not self.category_expanded[file_type]:
-                arrow = self.category_frames[file_type]['arrow']
-                content = self.category_frames[file_type]['content']
-                self.toggle_category_expand(file_type, arrow, content)
+        for group_key in self.category_frames:
+            if not self.category_expanded[group_key]:
+                arrow = self.category_frames[group_key]['arrow']
+                content = self.category_frames[group_key]['content']
+                self.toggle_category_expand(group_key, arrow, content)
 
     def collapse_all(self):
         """Collapse all categories"""
-        for file_type in self.category_frames:
-            if self.category_expanded[file_type]:
-                arrow = self.category_frames[file_type]['arrow']
-                content = self.category_frames[file_type]['content']
-                self.toggle_category_expand(file_type, arrow, content)
+        for group_key in self.category_frames:
+            if self.category_expanded[group_key]:
+                arrow = self.category_frames[group_key]['arrow']
+                content = self.category_frames[group_key]['content']
+                self.toggle_category_expand(group_key, arrow, content)
 
     def select_all(self):
         """Select all files in all categories"""
         # First expand all categories to load checkboxes
         self.expand_all()
         # Then select all
-        for file_type in self.category_vars:
-            self.category_vars[file_type].set(True)
-            if file_type in self.check_vars:
-                for var, entry in self.check_vars[file_type]:
+        for group_key in self.category_vars:
+            self.category_vars[group_key].set(True)
+            if group_key in self.check_vars:
+                for var, entry in self.check_vars[group_key]:
                     var.set(True)
 
     def deselect_all(self):
         """Deselect all files in all categories"""
-        for file_type in self.category_vars:
-            self.category_vars[file_type].set(False)
-            if file_type in self.check_vars:
-                for var, entry in self.check_vars[file_type]:
+        for group_key in self.category_vars:
+            self.category_vars[group_key].set(False)
+            if group_key in self.check_vars:
+                for var, entry in self.check_vars[group_key]:
                     var.set(False)
 
     def extract(self):
         """Extract selected files"""
         selected_files = []
-        for file_type in self.check_vars:
-            for var, entry in self.check_vars[file_type]:
+        for group_key in self.check_vars:
+            for var, entry in self.check_vars[group_key]:
                 if var.get():
                     selected_files.append(entry)
 
@@ -1519,12 +1666,13 @@ class RebuildWindow:
             title="Save Rebuilt Bundle As",
             defaultextension=".BDG",
             filetypes=[
-                ("Bundle Files", "*.BDG *.cmg *.cmp *.clp *.bdp"),
+                ("Bundle Files", "*.BDG *.cmg *.cmp *.clp *.bdp *.VOL"),
                 ("BDG Files", "*.BDG"),
                 ("CMG Files", "*.cmg"),
                 ("CMP Files", "*.cmp"),
                 ("CLP Files", "*.clp"),
                 ("BDP Files", "*.bdp"),
+                ("VOL Files", "*.VOL"),
                 ("All Files", "*.*")
             ]
         )
@@ -1735,12 +1883,13 @@ class PipeworksGUI:
         filename = filedialog.askopenfilename(
             title="Select Bundle File",
             filetypes=[
-                ("Bundle Files", "*.BDG *.cmg *.cmp *.clp *.bdp"),
+                ("Bundle Files", "*.BDG *.cmg *.cmp *.clp *.bdp *.VOL"),
                 ("BDG Files", "*.BDG"),
                 ("CMG Files", "*.cmg"),
                 ("CMP Files", "*.cmp"),
                 ("CLP Files", "*.clp"),
                 ("BDP Files", "*.bdp"),
+                ("VOL Files", "*.VOL"),
                 ("All Files", "*.*")
             ]
         )
@@ -1769,9 +1918,6 @@ class PipeworksGUI:
         if filepath.lower().endswith(('.cmp', '.clp', '.bdp')):
             self.output_text.insert(tk.END, "\n⚠ WARNING: If modding Save The Earth, STE's engine has a limit of 2,130KB. \n[Unleashed PS2 does NOT have this limit.] \n")
 
-        if filepath.lower().endswith('.vol'):
-            self.output_text.insert(tk.END, "\n⚠ WARNING: Unfortunately, .VOL support is experimental and does not function correctly.\n")
-
         self.output_text.insert(tk.END, "=" * 80 + "\n\n")
 
         # Parse file
@@ -1797,7 +1943,7 @@ class PipeworksGUI:
             for entry in results:
                 file_num = entry['file_num']
                 name = entry['name']
-                offset = entry['offset']
+                offset = entry['offset']  # Use actual offset for all bundle types
                 size = entry['size']
 
                 row = f"{file_num:<8} {name:<40} {offset:<12} {size:<12}\n"
