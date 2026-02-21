@@ -9,7 +9,7 @@ A GUI tool for parsing, extracting, and rebuilding Wii/GameCube/PS2 bundle files
 - **.CMP** - PS2 bundle files (STE, Unleashed)
 - **.CLP** - PS2 bundle files
 - **.BDP** - PS2 bundle files
-- **.VOL** - PS2 VOL format (experimental, view only)
+- **.VOL** - PS2 VOL format (GU PS2, Save the Earth)
 
 ## Requirements (Should come with .exe)
 
