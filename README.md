@@ -4,14 +4,21 @@ A GUI tool for parsing, extracting, and rebuilding Wii/GameCube/PS2 bundle files
 
 ## Supported Formats
 
-- **.BDG** - Wii bundle files (Unleashed)
+- **.BDG** - GameCube/Wii bundle files (e.g., Unleashed Wii)
 - **.CMG** - DAMM bundle files
-- **.CMP** - PS2 bundle files (STE, Unleashed)
+- **.CMP** - PS2 bundle files (e.g., Unleashed PS2)
 - **.CLP** - PS2 bundle files
+- **.CLF** - Xbox bundle files (similar to CLP)
+- **.BDL** - Xbox bundle files (similar to BDP)
 - **.BDP** - PS2 bundle files
-- **.VOL** - PS2 VOL format (GU PS2, Save the Earth)
+- **.BSF** - BSF bundle files
+- **.CCG** - CCG bundle files
+- **.CMF** - CMF bundle files
+- **.CCF** - CCF bundle files
+- **.VOL** - PS2 VOL format (extract only; files are organized into subfolders by extension)
+- **.ZIP** - ZIP archives containing any of the above formats
 
-## Requirements (Should come with .exe)
+## Requirements
 
 ### Python
 - Python 3.x
@@ -30,23 +37,25 @@ If not installed, you can still use the Browse button to select files.
 ### 1. Launch the Tool
 
 Download from Releases (Windows/Linux)
-- https://github.com/Digitzaki/GZBuildr/releases/tag/Release
 
 Source code:
 ```bash
-cd <location of GZBuildr.py>
-python GZBuildr.py
+python pipeworks_parser.py
 ```
 
-### 2. Parse a Bundle File
+### 2. Select a Bundle File or Directory
 
-**Option A: Drag and Drop** 
-- Drag a `.BDG`, `.CMG`, `.CMP`, `.CLP`, `.BDP` file into the input field
+**Option A: Open a Single File**
+- Click the "Browse" button and select any supported bundle or ZIP file directly
 
-**Option B: Browse**
-- Click the "Browse" button
-- Select your bundle file
-- Click "Parse File"
+**Option B: Open a Directory**
+- Click "Open Directory" to select a folder
+- The dropdown will populate with all supported bundle and ZIP files found in the folder and any subfolders
+- Subdirectory paths are shown relative to the selected folder (e.g., `BDG/Anguirus.bdg`)
+- Select the desired file from the dropdown, then click "Parse File"
+
+**Option C: Drag and Drop** (if tkinterdnd2 is installed)
+- Drag a supported bundle or ZIP file directly into the input field
 
 The tool will display all files contained in the bundle with their:
 - File number
@@ -82,6 +91,7 @@ After parsing, click the "Rebuild" button to modify and rebuild the bundle.
    - Click "Browse" under "Output Bundle File"
    - Choose where to save the rebuilt bundle
    - Select the appropriate file extension (.BDG, .CMG, .CMP, etc.)
+   - If the original file was loaded from a ZIP, the rebuilt bundle will automatically be re-packaged into a new ZIP at the chosen output path
 
 3. **Configure Block Alignment** ⚠️ **IMPORTANT**
    - The tool will automatically set default alignment values based on the file extension
@@ -102,6 +112,11 @@ After parsing, click the "Rebuild" button to modify and rebuild the bundle.
    - Files not found in the replacement directory will use originals
 
 #### Important Notes for Rebuilding:
+
+- **Model/Mesh Files (Type 0, 17):**
+  - Cannot exceed original file size
+  - If replacement is larger, original will be used automatically
+  - If replacement is smaller, it will be padded to prevent deformation
 
 - **Texture Files (Type 9):**
   - Size changes may indicate missing mipmaps
@@ -161,7 +176,7 @@ The tool organizes files by type ID:
 ## Tips
 
 - Always back up your original files before rebuilding
-- Parse the bundle first to see the exact file structure
+- Extract the bundle first to see the exact file structure
 - Use identical filenames when creating replacement files
 - Test rebuilt bundles thoroughly in-game
 - Keep note of successful alignment settings for future mods
@@ -170,8 +185,8 @@ The tool organizes files by type ID:
 
 Tool developed for modding Pipeworks games including:
 
-- Godzilla: Destroy all Monsters Melee
-- Godzilla: Save the Earth (PS2)
-- Godzilla: Unleashed (Wii & PS2)
+- Godzilla: Destroy all Monsters Melee (GC/Xbox)
+- Godzilla: Save the Earth (PS2/Xbox)
+- Godzilla: Unleashed (Wii/PS2)
 
-Note: Each game has virtually no size limit with exception to Save the Earth, which has an engine limit of 2130 KB bundle size.
+Note: Each game has virtually no size limit with exception to PS2, which has an engine limit of 2130 KB bundle size.

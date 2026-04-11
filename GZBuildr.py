@@ -8,7 +8,7 @@ Features:
 - Extract individual files by type
 - Rebuild BDG/CMG/CMP/BDL/VOL files with modified content
 - Drag-and-drop support
-- Supports Pipeworks format (BDG/CMG/CMP/CLP/BDP/BDL) and .VOL format (experimental)
+- Supports Pipeworks format (BDG/CMG/CMP/CLP/CLF/BDP/BDL/BSF) and .VOL format (experimental)
 - Block size alignment restrictions, adjustable during rebuild.
 
 To enable drag-and-drop functionality, install:
@@ -132,6 +132,7 @@ class PipeworksParser:
             'pss': 27,  # Video (PSS format)
             'bsf': 28,  # BSF File (PS2)
             'clp': 29,  # CLP File (PS2)
+            'clf': 29,  # CLF File (Xbox)
         }
 
         return extension_map.get(ext, 255)  # 255 = Unknown
@@ -597,15 +598,15 @@ class PipeworksParser:
         ext = os.path.splitext(self.filepath.lower())[1]
         is_cmg = ext == ".cmg"
         is_cmp = ext == ".cmp"
-        is_clp = ext == ".clp"
+        is_clp = ext in (".clp", ".clf")
         is_bdp = ext == ".bdp"
         is_bsf = ext == ".bsf"
         is_bdl = ext == ".bdl"
         is_ccg = ext == ".ccg"
         is_cmf = ext in (".cmf", ".ccf")
 
-        if is_cmg or is_bdl or is_ccg:
-            # CMG/BDL/CCG-specific (DAMM/GameCube)
+        if is_cmg or is_ccg:
+            # CMG/CCG-specific (DAMM/GameCube)
             type_alignments = {
                 0: 64,    # Static Mesh
                 2: 16,    # MONSTER_DATA (Stats/Config)
@@ -626,8 +627,8 @@ class PipeworksParser:
                 17: 64,   # Rigged Mesh
                 20: 16,   # Particle
             }
-        elif is_cmp or is_bdp or is_clp or is_bsf:
-            # PS2 Specific (CMP/BDP/CLP/BSF)
+        elif is_cmp or is_bdp or is_bdl or is_clp or is_bsf:
+            # PS2/Xbox Specific (CMP/BDP/BDL/CLP/BSF)
             type_alignments = {
                 0: 128,    # Static Mesh
                 6: 16,    # Material
@@ -1686,7 +1687,7 @@ class RebuildWindow:
                 17: 64,   # Rigged Mesh
                 20: 16,   # Particle
             }
-        elif filepath.endswith(('.cmp', '.bdp', '.clp', '.bsf')):
+        elif filepath.endswith(('.cmp', '.bdp', '.bdl', '.clp', '.clf', '.bsf')):
             defaults = {
                 0: 128,   # Static Mesh
                 6: 16,    # Material
@@ -1741,7 +1742,7 @@ class RebuildWindow:
                 17: 64,   # Rigged Mesh
                 20: 16,   # Particle
             }
-        elif filepath_lower.endswith(('.cmp', '.bdp', '.clp', '.bsf')):
+        elif filepath_lower.endswith(('.cmp', '.bdp', '.bdl', '.clp', '.clf', '.bsf')):
             defaults = {
                 0: 128,   # Static Mesh
                 6: 16,    # Material
@@ -1798,7 +1799,7 @@ class RebuildWindow:
         ext_upper = default_ext.lstrip('.').upper()
         filetypes = [
             (f"{ext_upper} Files", f"*{default_ext}"),
-            ("Bundle Files", "*.bdg *.cmg *.cmp *.clp *.bdp *.bsf *.vol *.ccg *.cmf *.ccf"),
+            ("Bundle Files", "*.bdg *.cmg *.cmp *.clp *.clf *.bdp *.bdl *.bsf *.vol *.ccg *.cmf *.ccf"),
             ("All Files", "*.*"),
         ]
 
@@ -2203,7 +2204,7 @@ class PipeworksGUI:
             messagebox.showerror("Invalid ZIP", f"Not a valid ZIP file: {zip_path}")
             return None, None
 
-        bundle_extensions = ('.bdg', '.cmg', '.cmp', '.clp', '.bdp', '.bsf', '.vol', '.ccg', '.cmf', '.ccf')
+        bundle_extensions = ('.bdg', '.cmg', '.cmp', '.clp', '.clf', '.bdp', '.bdl', '.bsf', '.vol', '.ccg', '.cmf', '.ccf')
         temp_dir = tempfile.mkdtemp(prefix="gzbuildr_zip_")
         self._zip_temp_dirs.append(temp_dir)
         extracted = []
@@ -2217,7 +2218,7 @@ class PipeworksGUI:
         if not extracted:
             messagebox.showinfo("No Bundles in ZIP",
                 "No supported bundle files found inside the ZIP.\n"
-                "Supported: .bdg .cmg .cmp .clp .bdp .bsf .vol .ccg .cmf .ccf")
+                "Supported: .bdg .cmg .cmp .clp .clf .bdp .bdl .bsf .vol .ccg .cmf .ccf")
             shutil.rmtree(temp_dir, ignore_errors=True)
             self._zip_temp_dirs.remove(temp_dir)
             return None, None
@@ -2229,7 +2230,7 @@ class PipeworksGUI:
         self.current_bundle_dir = directory
         self.file_path_var.set(directory)
 
-        bundle_extensions = ('.bdg', '.cmg', '.cmp', '.clp', '.bdp', '.bsf', '.vol', '.ccg', '.cmf', '.ccf')
+        bundle_extensions = ('.bdg', '.cmg', '.cmp', '.clp', '.clf', '.bdp', '.bdl', '.bsf', '.vol', '.ccg', '.cmf', '.ccf')
         self.bundle_files = []
 
         for root, dirs, files in os.walk(directory):
@@ -2335,7 +2336,11 @@ class PipeworksGUI:
 
         # Add warning for PS2 bundle files
         if filepath.lower().endswith(('.cmp', '.clp', '.bdp', '.bsf')):
-            self.output_text.insert(tk.END, "\n⚠ WARNING: If modding PS2, PS2 has a limit of 2,130KB. \n")
+            self.output_text.insert(tk.END, "\n⚠ WARNING: If modding Save The Earth, STE's engine has a limit of 2,130KB. \n[Unleashed PS2 does NOT have this limit.] \n")
+        elif filepath.lower().endswith(('.clf',)):
+            self.output_text.insert(tk.END, "\n[Xbox Bundle (.clf)]\n")
+        elif filepath.lower().endswith(('.bdl',)):
+            self.output_text.insert(tk.END, "\n[Xbox Bundle (.bdl)]\n")
         elif filepath.lower().endswith(('.ccg',)):
             self.output_text.insert(tk.END, "\n[GameCube Stage Bundle (.ccg)]\n")
         elif filepath.lower().endswith(('.cmf', '.ccf')):
