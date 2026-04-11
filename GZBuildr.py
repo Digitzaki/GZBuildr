@@ -4,11 +4,11 @@ Pipeworks Bundle Parser
 A GUI tool for parsing, extracting, and rebuilding GameCube/PS2 bundle files.
 
 Features:
-- Parse BDG/CMG/CMP/VOL bundle files and display contents
+- Parse BDG/CMG/CMP/BDL/VOL bundle files and display contents
 - Extract individual files by type
-- Rebuild BDG/CMG/CMP/VOL files with modified content
+- Rebuild BDG/CMG/CMP/BDL/VOL files with modified content
 - Drag-and-drop support
-- Supports Pipeworks format (BDG/CMG/CMP/CLP/BDP) and .VOL format (experimental)
+- Supports Pipeworks format (BDG/CMG/CMP/CLP/BDP/BDL) and .VOL format (experimental)
 - Block size alignment restrictions, adjustable during rebuild.
 
 To enable drag-and-drop functionality, install:
@@ -31,7 +31,21 @@ from tkinter import ttk, filedialog, scrolledtext, messagebox
 import struct
 import os
 import shutil
-    
+import zipfile
+import tempfile
+
+
+def _dialog(parent, dialog_fn, **kwargs):
+    host = tk.Toplevel(parent)
+    host.withdraw()
+    host.attributes('-topmost', True)
+    try:
+        result = dialog_fn(parent=host, **kwargs)
+    finally:
+        host.destroy()
+    return result
+
+
 # Try to import drag-and-drop library
 HAS_DND = False
 
@@ -116,6 +130,8 @@ class PipeworksParser:
             'mic': 25,  # Audio (MIC format)
             'bdp': 26,  # BDP File
             'pss': 27,  # Video (PSS format)
+            'bsf': 28,  # BSF File (PS2)
+            'clp': 29,  # CLP File (PS2)
         }
 
         return extension_map.get(ext, 255)  # 255 = Unknown
@@ -171,6 +187,25 @@ class PipeworksParser:
                 self.file_data = f.read()
 
             # Check header to determine bundle type
+            header = self.file_data[0:4].decode('ascii', errors='ignore')
+
+            if header == "PVOL":
+                self.bundle_type = 'vol'
+                return self.parse_vol()
+            elif self.file_data[0:9].decode('ascii', errors='ignore') == "Pipeworks":
+                self.bundle_type = 'pipeworks'
+                return self.parse_pipeworks()
+            else:
+                return [{"error": "Not a valid bundle file (expected 'Pipeworks' or 'PVOL' header)"}]
+
+        except Exception as e:
+            return [{"error": f"Error parsing file: {str(e)}"}]
+
+    def parse_from_data(self, data):
+        """Parse bundle file from raw bytes (used for ZIP extraction)"""
+        try:
+            self.file_data = data
+
             header = self.file_data[0:4].decode('ascii', errors='ignore')
 
             if header == "PVOL":
@@ -417,16 +452,24 @@ class PipeworksParser:
 
     def find_replacement_file(self, replacement_dir, original_name):
         """
-        Find replacement file with exact filename match.
+        Find replacement file with case-insensitive filename match.
 
         NOTE: CMG files are bundle containers (same as BDG), not mesh files.
         They should not be replaced with .mesh files or vice versa.
         Returns (filepath, actual_name) if found, or (None, None) if not found.
         """
-        # Only look for exact filename match
+        # First try exact match
         original_path = os.path.join(replacement_dir, original_name)
         if os.path.exists(original_path):
             return original_path, original_name
+
+        # Try case-insensitive match
+        original_lower = original_name.lower()
+        for filename in os.listdir(replacement_dir):
+            if filename.lower() == original_lower:
+                filepath = os.path.join(replacement_dir, filename)
+                if os.path.isfile(filepath):
+                    return filepath, filename
 
         return None, None
 
@@ -551,23 +594,40 @@ class PipeworksParser:
             return self.custom_alignments[file_type]
 
         # Check if we're rebuilding a CMG or CMP bundle
-        is_cmg = self.filepath.lower().endswith(".cmg")
-        is_cmp = self.filepath.lower().endswith(".cmp")
-        is_clp = self.filepath.lower().endswith(".clp")
-        is_bdp = self.filepath.lower().endswith(".bdp")
+        ext = os.path.splitext(self.filepath.lower())[1]
+        is_cmg = ext == ".cmg"
+        is_cmp = ext == ".cmp"
+        is_clp = ext == ".clp"
+        is_bdp = ext == ".bdp"
+        is_bsf = ext == ".bsf"
+        is_bdl = ext == ".bdl"
+        is_ccg = ext == ".ccg"
+        is_cmf = ext in (".cmf", ".ccf")
 
-        if is_cmg:
-            # CMG-specific (DAMM)
+        if is_cmg or is_bdl or is_ccg:
+            # CMG/BDL/CCG-specific (DAMM/GameCube)
             type_alignments = {
                 0: 64,    # Static Mesh
+                2: 16,    # MONSTER_DATA (Stats/Config)
                 6: 16,    # Material
-                9: 64,   # Texture
+                9: 64,    # Texture
                 13: 16,   # Palette
                 17: 64,   # Rigged Mesh
                 20: 16,   # Particle
             }
-        elif is_cmp or is_bdp or is_clp:
-            # PS2 Specific (CMP/BDP/CLP)
+        elif is_cmf:
+            # CMF/CCF-specific (Xbox DAMM)
+            type_alignments = {
+                0: 64,    # Static Mesh
+                2: 16,    # MONSTER_DATA (Stats/Config)
+                6: 16,    # Material
+                9: 64,    # Texture
+                13: 16,   # Palette
+                17: 64,   # Rigged Mesh
+                20: 16,   # Particle
+            }
+        elif is_cmp or is_bdp or is_clp or is_bsf:
+            # PS2 Specific (CMP/BDP/CLP/BSF)
             type_alignments = {
                 0: 128,    # Static Mesh
                 6: 16,    # Material
@@ -610,21 +670,25 @@ class PipeworksParser:
 
             print(f"Detected base alignment - Main: {detected_main_alignment} bytes, Resource: {detected_resource_alignment} bytes")
 
-            # Group ALL entries by file_num to handle main and resource files together
-            file_groups = {}
+            # Build a map of file_num to actual file data entries
+            file_data_map = {}
             for entry in all_files:
                 file_num = entry['file_num']
-                if file_num not in file_groups:
-                    file_groups[file_num] = {
-                        'main': None,
-                        'resource': None,
-                        'toc_offset': entry['toc_entry_offset']
-                    }
+                if file_num not in file_data_map:
+                    file_data_map[file_num] = {'main': None, 'resource': None}
 
                 if entry['is_resource']:
-                    file_groups[file_num]['resource'] = entry
+                    # Keep entry with largest size (handles dummy entries with size=0)
+                    if file_data_map[file_num]['resource'] is None or entry['size'] > file_data_map[file_num]['resource']['size']:
+                        file_data_map[file_num]['resource'] = entry
                 else:
-                    file_groups[file_num]['main'] = entry
+                    # Keep entry with largest size (handles dummy entries with size=0)
+                    if file_data_map[file_num]['main'] is None or entry['size'] > file_data_map[file_num]['main']['size']:
+                        file_data_map[file_num]['main'] = entry
+
+            # Get the actual TOC entry count from header (not the parsed entries which splits main/resource)
+            toc_entry_count = self.file_count
+            toc_start = 0x78
 
             # Keep header and TOC structure
             header_size = self.main_data_offset
@@ -637,203 +701,230 @@ class PipeworksParser:
             # Determine endianness format
             endian = '>' if self.is_big_endian else '<'
 
-            # Process files in TOC order (by file_num) to maintain consistency
-            print(f"\nRebuilding {len(file_groups)} files...")
-            for file_num in sorted(file_groups.keys()):
-                group = file_groups[file_num]
-                toc_offset = group['toc_offset']
+            # Track data that has already been written (to avoid writing duplicate file_num data multiple times)
+            written_file_data = {}  # file_num -> {'main_offset': ..., 'main_size': ..., 'res_offset': ..., 'res_size': ...}
 
-                # Process main file
-                main_offset = 0
-                main_size = 0
-                if group['main']:
-                    entry = group['main']
+            # Process ALL TOC entries in order by reading directly from the original TOC
+            print(f"\nRebuilding {toc_entry_count} TOC entries (referencing {len(file_data_map)} unique file_nums)...")
+            for i in range(toc_entry_count):
+                toc_offset = toc_start + (i * 0x12)
 
-                    # Get appropriate alignment for this file type
-                    file_alignment = self.get_alignment_for_type(entry['file_type'], detected_main_alignment)
+                # Read original TOC entry
+                file_num = self.read_short(toc_offset)
 
-                    # Look for replacement file (exact filename match only)
-                    replacement_path, actual_name = self.find_replacement_file(replacement_dir, entry['name'])
+                # Get the actual file data for this file_num
+                file_info = file_data_map.get(file_num, {'main': None, 'resource': None})
 
-                    if replacement_path:
-                        file_data = self.read_replacement_file(replacement_path)
-                        original_data = self.read_bytes(entry['offset'], entry['size'])
+                # Check if we've already written this file_num's data
+                if file_num in written_file_data:
+                    # Reuse offsets from when we first wrote this file_num
+                    cached = written_file_data[file_num]
+                    main_offset = cached['main_offset']
+                    main_size = cached['main_size']
+                    res_offset = cached['res_offset']
+                    res_size = cached['res_size']
 
-                        original_size = len(file_data)
-                        size_changed = len(file_data) != entry['size']
-                        already_printed = False  # Track if we already printed status
+                    print(f"  TOC entry at 0x{toc_offset:X} (file_num={file_num}): Reusing previously written data")
+                else:
+                    # First time seeing this file_num, process and write the file data
+                    main_offset = 0
+                    main_size = 0
+                    if file_info['main']:
+                        entry = file_info['main']
 
-                        # Validate replacement based on file type
-                        issues = []
-                        warnings = []
+                        # Get appropriate alignment for this file type
+                        file_alignment = self.get_alignment_for_type(entry['file_type'], detected_main_alignment)
 
-                        if entry['file_type'] == 9:  # Texture
-                            issues, warnings = self.validate_texture_replacement(original_data, file_data, entry['name'])
-                        elif entry['file_type'] in [0, 17]:  # Static/Rigged Mesh
-                            issues, warnings = self.validate_model_replacement(original_data, file_data, entry['name'])
+                        # Look for replacement file (exact filename match only)
+                        replacement_path, actual_name = self.find_replacement_file(replacement_dir, entry['name'])
 
-                            # CRITICAL: Pad models to original size to prevent stretching/deformation
-                            if len(file_data) != entry['size']:
-                                if len(file_data) > entry['size']:
-                                    # Model is too large - MUST use original to prevent stretching
-                                    issues.append(f"Model EXCEEDS original size by {len(file_data) - entry['size']} bytes")
-                                    issues.append("Using ORIGINAL model to prevent map-wide stretching/deformation")
+                        if replacement_path:
+                            file_data = self.read_replacement_file(replacement_path)
+                            original_data = self.read_bytes(entry['offset'], entry['size'])
 
-                                    # Print errors BEFORE falling back
-                                    file_info = entry['name']
-                                    if actual_name != entry['name']:
-                                        file_info = f"{entry['name']} → {actual_name}"
-                                    print(f"  File {file_num} ({file_info}): REJECTED - replacement too large!")
-                                    for issue in issues:
-                                        print(f"    ⚠ {issue}")
-                                    for warning in warnings:
-                                        print(f"    ⓘ {warning}")
+                            original_size = len(file_data)
+                            size_changed = len(file_data) != entry['size']
+                            already_printed = False  # Track if we already printed status
 
-                                    # Fall back to original data
-                                    file_data = original_data
-                                    issues = []  # Clear issues since we're using original
-                                    warnings = []
-                                    size_changed = False
-                                    already_printed = True  # Already printed rejection message
-                                    print(f"    → Using original model, size {len(file_data)}")
-                                else:
-                                    # Pad to original size
-                                    file_data = self.pad_model_to_block_size(file_data, entry['size'])
-                                    warnings.append(f"Padded model from {original_size} to {len(file_data)} bytes to prevent stretching")
-                                    size_changed = False  # After padding, size matches
-                        elif size_changed:
-                            # Generic validation for other file types
-                            size_diff_pct = abs(len(file_data) - entry['size']) / entry['size'] * 100
-                            if size_diff_pct > 10:
-                                warnings.append(f"Size changed: {entry['size']} -> {len(file_data)} ({size_diff_pct:.1f}%)")
+                            # Validate replacement based on file type
+                            issues = []
+                            warnings = []
 
-                        # Print status (only if not already printed)
-                        if not already_printed:
-                            status = "replacement" if size_changed else "replacement (same size)"
-                            size_info = f"size {len(file_data)}"
-                            if entry['file_type'] in [0, 17] and len(file_data) == entry['size'] and original_size != entry['size']:
-                                size_info = f"size {len(file_data)} (padded from {original_size})"
+                            if entry['file_type'] == 9:  # Texture
+                                issues, warnings = self.validate_texture_replacement(original_data, file_data, entry['name'])
+                            elif entry['file_type'] in [0, 17]:  # Static/Rigged Mesh
+                                issues, warnings = self.validate_model_replacement(original_data, file_data, entry['name'])
 
-                            # Show if using alternative file
-                            file_info = entry['name']
-                            if actual_name != entry['name']:
-                                file_info = f"{entry['name']} → {actual_name}"
+                                # CRITICAL: Pad models to original size to prevent stretching/deformation
+                                if len(file_data) != entry['size']:
+                                    if len(file_data) > entry['size']:
+                                        # Model is too large - MUST use original to prevent stretching
+                                        issues.append(f"Model EXCEEDS original size by {len(file_data) - entry['size']} bytes")
+                                        issues.append("Using ORIGINAL model to prevent map-wide stretching/deformation")
 
-                            print(f"  File {file_num} ({file_info}): Using {status}, {size_info}, align {file_alignment}")
+                                        # Print errors BEFORE falling back
+                                        file_display = entry['name']
+                                        if actual_name != entry['name']:
+                                            file_display = f"{entry['name']} → {actual_name}"
+                                        print(f"  File {file_num} ({file_display}): REJECTED - replacement too large!")
+                                        for issue in issues:
+                                            print(f"    ⚠ {issue}")
+                                        for warning in warnings:
+                                            print(f"    ⓘ {warning}")
 
-                            # Print issues and warnings
-                            for issue in issues:
-                                print(f"    ⚠ CRITICAL: {issue}")
-                            for warning in warnings:
-                                print(f"    ⓘ {warning}")
+                                        # Fall back to original data
+                                        file_data = original_data
+                                        issues = []  # Clear issues since we're using original
+                                        warnings = []
+                                        size_changed = False
+                                        already_printed = True  # Already printed rejection message
+                                        print(f"    → Using original model, size {len(file_data)}")
+                                    else:
+                                        # Pad to original size
+                                        file_data = self.pad_model_to_block_size(file_data, entry['size'])
+                                        warnings.append(f"Padded model from {original_size} to {len(file_data)} bytes to prevent stretching")
+                                        size_changed = False  # After padding, size matches
+                            elif size_changed:
+                                # Generic validation for other file types
+                                size_diff_pct = abs(len(file_data) - entry['size']) / entry['size'] * 100
+                                if size_diff_pct > 10:
+                                    warnings.append(f"Size changed: {entry['size']} -> {len(file_data)} ({size_diff_pct:.1f}%)")
 
-                        if issues:
-                            print(f"    ⚠ File may cause rendering issues or crashes!")
-                    else:
-                        file_data = self.read_bytes(entry['offset'], entry['size'])
-                        type_info = ""
-                        if entry['file_type'] in [0, 17]:
-                            type_info = f" [Model: original size={entry['size']}]"
-                        print(f"  File {file_num} ({entry['name']}): Using original, size {len(file_data)}, align {file_alignment}{type_info}")
+                            # Print status (only if not already printed)
+                            if not already_printed:
+                                status = "replacement" if size_changed else "replacement (same size)"
+                                size_info = f"size {len(file_data)}"
+                                if entry['file_type'] in [0, 17] and len(file_data) == entry['size'] and original_size != entry['size']:
+                                    size_info = f"size {len(file_data)} (padded from {original_size})"
 
-                    # Calculate new offset with proper alignment
-                    current_pos = len(new_file_data)
-                    if current_pos > 0:
-                        # Apply alignment padding based on file type
-                        padding = (file_alignment - (current_pos % file_alignment)) % file_alignment
-                        if padding > 0:
-                            new_file_data.extend(b'\x00' * padding)
+                                # Show if using alternative file
+                                file_display = entry['name']
+                                if actual_name != entry['name']:
+                                    file_display = f"{entry['name']} → {actual_name}"
 
-                    main_offset = len(new_file_data)
-                    main_size = len(file_data)
+                                print(f"  File {file_num} ({file_display}): Using {status}, {size_info}, align {file_alignment}")
 
-                    # Add file data
-                    new_file_data.extend(file_data)
+                                # Print issues and warnings
+                                for issue in issues:
+                                    print(f"    ⚠ CRITICAL: {issue}")
+                                for warning in warnings:
+                                    print(f"    ⓘ {warning}")
 
-                # Process resource file
-                res_offset = 0
-                res_size = 0
-                if group['resource']:
-                    entry = group['resource']
+                            if issues:
+                                print(f"    ⚠ File may cause rendering issues or crashes!")
+                        else:
+                            file_data = self.read_bytes(entry['offset'], entry['size'])
+                            type_info = ""
+                            if entry['file_type'] in [0, 17]:
+                                type_info = f" [Model: original size={entry['size']}]"
+                            print(f"  File {file_num} ({entry['name']}): Using original, size {len(file_data)}, align {file_alignment}{type_info}")
 
-                    # Resources typically use the same alignment as their parent file type
-                    resource_alignment = self.get_alignment_for_type(entry['file_type'], detected_resource_alignment)
+                        # Calculate new offset with proper alignment
+                        current_pos = len(new_file_data)
+                        if current_pos > 0:
+                            # Apply alignment padding based on file type
+                            padding = (file_alignment - (current_pos % file_alignment)) % file_alignment
+                            if padding > 0:
+                                new_file_data.extend(b'\x00' * padding)
 
-                    # Look for replacement file (exact filename match only)
-                    replacement_path, res_actual_name = self.find_replacement_file(replacement_dir, entry['name'])
+                        main_offset = len(new_file_data)
+                        main_size = len(file_data)
 
-                    if replacement_path:
-                        resource_data = self.read_replacement_file(replacement_path)
-                        original_data = self.read_bytes(entry['offset'], entry['size'])
+                        # Add file data
+                        new_file_data.extend(file_data)
 
-                        original_res_size = len(resource_data)
-                        size_changed = len(resource_data) != entry['size']
-                        res_already_printed = False
+                    # Process resource file
+                    res_offset = 0
+                    res_size = 0
+                    if file_info['resource']:
+                        entry = file_info['resource']
 
-                        # Validate resource based on file type
-                        issues = []
-                        warnings = []
+                        # Resources typically use the same alignment as their parent file type
+                        resource_alignment = self.get_alignment_for_type(entry['file_type'], detected_resource_alignment)
 
-                        if entry['file_type'] == 9:  # Texture resource (likely mipmaps)
-                            issues, warnings = self.validate_texture_replacement(original_data, resource_data, entry['name'])
-                            if size_changed:
-                                issues.append("Texture resource size changed - this often contains mipmap data!")
-                                issues.append("Missing mipmaps will cause low-resolution rendering at distance")
-                        elif entry['file_type'] in [0, 17]:  # Model resource
-                            # Models resources also need size preservation
-                            if len(resource_data) != entry['size']:
-                                if len(resource_data) > entry['size']:
-                                    # Resource too large - fall back to original
-                                    issues.append(f"Model resource EXCEEDS original by {len(resource_data) - entry['size']} bytes")
-                                    issues.append("Using ORIGINAL resource to prevent deformation")
+                        # Look for replacement file (exact filename match only)
+                        replacement_path, res_actual_name = self.find_replacement_file(replacement_dir, entry['name'])
 
-                                    res_info = entry['name'] if res_actual_name == entry['name'] else f"{entry['name']} → {res_actual_name}"
-                                    print(f"    Resource ({res_info}): REJECTED - replacement too large!")
-                                    for issue in issues:
-                                        print(f"      ⚠ {issue}")
+                        if replacement_path:
+                            resource_data = self.read_replacement_file(replacement_path)
+                            original_data = self.read_bytes(entry['offset'], entry['size'])
 
-                                    resource_data = original_data
-                                    issues = []
-                                    warnings = []
-                                    size_changed = False
-                                    res_already_printed = True
-                                    print(f"      → Using original resource, size {len(resource_data)}")
-                                else:
-                                    # Pad to original size
-                                    resource_data = self.pad_model_to_block_size(resource_data, entry['size'])
-                                    warnings.append(f"Padded resource from {original_res_size} to {len(resource_data)} bytes")
-                                    size_changed = False
+                            original_res_size = len(resource_data)
+                            size_changed = len(resource_data) != entry['size']
+                            res_already_printed = False
 
-                        # Print status (only if not already printed)
-                        if not res_already_printed:
-                            status = "replacement" if size_changed else "replacement (same size)"
-                            res_info = entry['name'] if res_actual_name == entry['name'] else f"{entry['name']} → {res_actual_name}"
-                            print(f"    Resource ({res_info}): Using {status}, size {len(resource_data)}, align {resource_alignment}")
+                            # Validate resource based on file type
+                            issues = []
+                            warnings = []
 
-                            # Print issues and warnings
-                            for issue in issues:
-                                print(f"      ⚠ CRITICAL: {issue}")
-                            for warning in warnings:
-                                print(f"      ⓘ {warning}")
-                    else:
-                        resource_data = self.read_bytes(entry['offset'], entry['size'])
-                        print(f"    Resource: Using original, size {len(resource_data)}, align {resource_alignment}")
+                            if entry['file_type'] == 9:  # Texture resource (likely mipmaps)
+                                issues, warnings = self.validate_texture_replacement(original_data, resource_data, entry['name'])
+                                if size_changed:
+                                    issues.append("Texture resource size changed - this often contains mipmap data!")
+                                    issues.append("Missing mipmaps will cause low-resolution rendering at distance")
+                            elif entry['file_type'] in [0, 17]:  # Model resource
+                                # Models resources also need size preservation
+                                if len(resource_data) != entry['size']:
+                                    if len(resource_data) > entry['size']:
+                                        # Resource too large - fall back to original
+                                        issues.append(f"Model resource EXCEEDS original by {len(resource_data) - entry['size']} bytes")
+                                        issues.append("Using ORIGINAL resource to prevent deformation")
 
-                    # Calculate new offset with proper alignment
-                    current_pos = len(new_resource_data)
-                    if current_pos > 0:
-                        # Apply alignment padding based on file type
-                        padding = (resource_alignment - (current_pos % resource_alignment)) % resource_alignment
-                        if padding > 0:
-                            new_resource_data.extend(b'\x00' * padding)
+                                        res_info = entry['name'] if res_actual_name == entry['name'] else f"{entry['name']} → {res_actual_name}"
+                                        print(f"    Resource ({res_info}): REJECTED - replacement too large!")
+                                        for issue in issues:
+                                            print(f"      ⚠ {issue}")
 
-                    res_offset = len(new_resource_data)
-                    res_size = len(resource_data)
+                                        resource_data = original_data
+                                        issues = []
+                                        warnings = []
+                                        size_changed = False
+                                        res_already_printed = True
+                                        print(f"      → Using original resource, size {len(resource_data)}")
+                                    else:
+                                        # Pad to original size
+                                        resource_data = self.pad_model_to_block_size(resource_data, entry['size'])
+                                        warnings.append(f"Padded resource from {original_res_size} to {len(resource_data)} bytes")
+                                        size_changed = False
 
-                    # Add resource data
-                    new_resource_data.extend(resource_data)
+                            # Print status (only if not already printed)
+                            if not res_already_printed:
+                                status = "replacement" if size_changed else "replacement (same size)"
+                                res_info = entry['name'] if res_actual_name == entry['name'] else f"{entry['name']} → {res_actual_name}"
+                                print(f"    Resource ({res_info}): Using {status}, size {len(resource_data)}, align {resource_alignment}")
 
-                # Update entire TOC entry with new values
+                                # Print issues and warnings
+                                for issue in issues:
+                                    print(f"      ⚠ CRITICAL: {issue}")
+                                for warning in warnings:
+                                    print(f"      ⓘ {warning}")
+                        else:
+                            resource_data = self.read_bytes(entry['offset'], entry['size'])
+                            print(f"    Resource: Using original, size {len(resource_data)}, align {resource_alignment}")
+
+                        # Calculate new offset with proper alignment
+                        current_pos = len(new_resource_data)
+                        if current_pos > 0:
+                            # Apply alignment padding based on file type
+                            padding = (resource_alignment - (current_pos % resource_alignment)) % resource_alignment
+                            if padding > 0:
+                                new_resource_data.extend(b'\x00' * padding)
+
+                        res_offset = len(new_resource_data)
+                        res_size = len(resource_data)
+
+                        # Add resource data
+                        new_resource_data.extend(resource_data)
+
+                    # Cache the written data for this file_num
+                    written_file_data[file_num] = {
+                        'main_offset': main_offset,
+                        'main_size': main_size,
+                        'res_offset': res_offset,
+                        'res_size': res_size
+                    }
+
+                # Write TOC entry (whether new data or cached)
                 # TOC entry structure (18 bytes):
                 # +0: file_num (2 bytes) - keep original
                 # +2: main_offset (4 bytes)
@@ -1102,10 +1193,11 @@ class ExtractWindow:
         27: "Video"
     }
 
-    def __init__(self, parent, file_entries, parser, output_text_callback):
+    def __init__(self, parent, file_entries, parser, output_text_callback, extract_dir_callback=None):
         self.file_entries = file_entries
         self.parser = parser
         self.output_text_callback = output_text_callback
+        self.extract_dir_callback = extract_dir_callback  # Callback to pass extract dir back to main GUI
 
         self.window = tk.Toplevel(parent)
         self.window.title("Extract Files")
@@ -1409,7 +1501,17 @@ class ExtractWindow:
             return
 
         # Ask for output directory
-        output_dir = filedialog.askdirectory(parent=self.window, title="Select Output Directory")
+        initial_extract = (
+            os.path.dirname(self.parser.filepath)
+            if self.parser and hasattr(self.parser, 'filepath')
+            else os.path.expanduser("~")
+        )
+        output_dir = _dialog(
+            self.window,
+            filedialog.askdirectory,
+            title="Select Output Directory",
+            initialdir=initial_extract,
+        )
         if not output_dir:
             return
 
@@ -1431,6 +1533,10 @@ class ExtractWindow:
         self.output_text_callback(f"\n{message}\n")
         self.output_text_callback(f"Files extracted to: {output_dir}\n")
 
+        # Pass extract directory back to main GUI
+        if self.extract_dir_callback:
+            self.extract_dir_callback(output_dir)
+
     def destroy(self):
         """Clean up and destroy window"""
         self.cleanup_bindings()
@@ -1438,15 +1544,18 @@ class ExtractWindow:
 
 
 class RebuildWindow:
-    def __init__(self, parent, parsed_files, parser, output_text_callback):
+    def __init__(self, parent, parsed_files, parser, output_text_callback, bulk_bundles=None, last_extract_dir=None, zip_source=None):
         self.parsed_files = parsed_files
         self.parser = parser
         self.output_text_callback = output_text_callback
         self.build_from_scratch = (parsed_files is None or parser is None)
+        self.bulk_bundles = bulk_bundles  # List of bundle file paths for bulk rebuild
+        self.last_extract_dir = last_extract_dir  # Auto-populate with last extraction directory
+        self.zip_source = zip_source  # Original ZIP path if current bundle came from a ZIP
 
         self.window = tk.Toplevel(parent)
         self.window.title("Build Bundle from Directory" if self.build_from_scratch else "Rebuild Bundle")
-        self.window.geometry("800x700")
+        self.window.geometry("800x600")
         self.window.resizable(True, True)
         self.window.minsize(600, 400)
 
@@ -1466,6 +1575,9 @@ class RebuildWindow:
         repl_frame.columnconfigure(0, weight=1)
 
         self.repl_dir_var = tk.StringVar()
+        # Auto-populate with last extraction directory if available
+        if self.last_extract_dir and os.path.isdir(self.last_extract_dir):
+            self.repl_dir_var.set(self.last_extract_dir)
         repl_entry = ttk.Entry(repl_frame, textvariable=self.repl_dir_var, state='readonly')
         repl_entry.grid(row=0, column=0, sticky=(tk.W, tk.E), padx=(0, 5))
 
@@ -1563,11 +1675,9 @@ class RebuildWindow:
 
     def set_default_alignments(self):
         """Set default alignment values based on file extension"""
-        # Detect file type from parser
         filepath = self.parser.filepath.lower()
 
-        if filepath.endswith(".cmg"):
-            # CMG-specific (DAMM)
+        if filepath.endswith(('.cmg', '.ccg', '.cmf', '.ccf')):
             defaults = {
                 0: 64,    # Static Mesh
                 6: 16,    # Material
@@ -1576,8 +1686,7 @@ class RebuildWindow:
                 17: 64,   # Rigged Mesh
                 20: 16,   # Particle
             }
-        elif filepath.endswith(('.cmp', '.bdp', '.clp')):
-            # PS2 Specific (CMP/BDP/CLP)
+        elif filepath.endswith(('.cmp', '.bdp', '.clp', '.bsf')):
             defaults = {
                 0: 128,   # Static Mesh
                 6: 16,    # Material
@@ -1587,7 +1696,6 @@ class RebuildWindow:
                 20: 16,   # Particle
             }
         else:
-            # BDG / UNLEASHED (WII)
             defaults = {
                 0: 512,   # Static Mesh
                 6: 16,    # Material
@@ -1597,7 +1705,6 @@ class RebuildWindow:
                 20: 16,   # Particle
             }
 
-        # Set the values
         for type_id, value in defaults.items():
             if type_id in self.alignment_vars:
                 self.alignment_vars[type_id].set(value)
@@ -1625,8 +1732,7 @@ class RebuildWindow:
         # Determine alignment values based on extension
         alignment_values = [16, 32, 64, 128, 256, 512, 1024, 2048]
 
-        if filepath_lower.endswith(".cmg"):
-            # CMG-specific (DAMM)
+        if filepath_lower.endswith(('.cmg', '.ccg', '.cmf', '.ccf')):
             defaults = {
                 0: 64,    # Static Mesh
                 6: 16,    # Material
@@ -1635,8 +1741,7 @@ class RebuildWindow:
                 17: 64,   # Rigged Mesh
                 20: 16,   # Particle
             }
-        elif filepath_lower.endswith(('.cmp', '.bdp', '.clp')):
-            # PS2 Specific (CMP/BDP/CLP)
+        elif filepath_lower.endswith(('.cmp', '.bdp', '.clp', '.bsf')):
             defaults = {
                 0: 128,   # Static Mesh
                 6: 16,    # Material
@@ -1646,7 +1751,6 @@ class RebuildWindow:
                 20: 16,   # Particle
             }
         else:
-            # BDG / UNLEASHED (WII)
             defaults = {
                 0: 512,   # Static Mesh
                 6: 16,    # Material
@@ -1664,27 +1768,53 @@ class RebuildWindow:
 
     def browse_replacement_dir(self):
         """Browse for replacement files directory"""
-        directory = filedialog.askdirectory(parent=self.window, title="Select Directory with Replacement Files")
+        initial = (
+            self.repl_dir_var.get()
+            or (os.path.dirname(self.parser.filepath) if self.parser and hasattr(self.parser, 'filepath') else None)
+            or os.path.expanduser("~")
+        )
+        directory = _dialog(
+            self.window,
+            filedialog.askdirectory,
+            title="Select Directory with Replacement Files",
+            initialdir=initial,
+        )
         if directory:
             self.repl_dir_var.set(directory)
             self.status_text.insert(tk.END, f"Replacement directory: {directory}\n")
 
     def browse_output_file(self):
         """Browse for output bundle file location"""
-        filepath = filedialog.asksaveasfilename(
-            parent=self.window,
+        # Derive default filename and extension from the bundle being parsed
+        initial_file = ""
+        default_ext = ".bdg"
+        if not self.build_from_scratch and self.parser and hasattr(self.parser, 'filepath'):
+            src = self.parser.filepath
+            initial_file = os.path.basename(src)
+            ext = os.path.splitext(src)[1].lower()
+            if ext:
+                default_ext = ext
+
+        ext_upper = default_ext.lstrip('.').upper()
+        filetypes = [
+            (f"{ext_upper} Files", f"*{default_ext}"),
+            ("Bundle Files", "*.bdg *.cmg *.cmp *.clp *.bdp *.bsf *.vol *.ccg *.cmf *.ccf"),
+            ("All Files", "*.*"),
+        ]
+
+        initialdir = (
+            os.path.dirname(self.parser.filepath)
+            if not self.build_from_scratch and self.parser and hasattr(self.parser, 'filepath')
+            else os.path.expanduser("~")
+        )
+        filepath = _dialog(
+            self.window,
+            filedialog.asksaveasfilename,
             title="Save Rebuilt Bundle As",
-            defaultextension=".BDG",
-            filetypes=[
-                ("Bundle Files", "*.BDG *.cmg *.cmp *.clp *.bdp *.VOL"),
-                ("BDG Files", "*.BDG"),
-                ("CMG Files", "*.cmg"),
-                ("CMP Files", "*.cmp"),
-                ("CLP Files", "*.clp"),
-                ("BDP Files", "*.bdp"),
-                ("VOL Files", "*.VOL"),
-                ("All Files", "*.*")
-            ]
+            initialdir=initialdir,
+            initialfile=initial_file,
+            defaultextension=default_ext,
+            filetypes=filetypes,
         )
         if filepath:
             self.output_file_var.set(filepath)
@@ -1703,7 +1833,6 @@ class RebuildWindow:
             messagebox.showwarning("Missing Input", "Please select an output file location.")
             return
 
-        # Check if building from scratch
         if self.build_from_scratch:
             self.build_from_directory(replacement_dir, output_path)
             return
@@ -1712,11 +1841,11 @@ class RebuildWindow:
         custom_alignments = {}
         for type_id, var in self.alignment_vars.items():
             value = var.get()
-            if value != 'N/A':  # Only set if a value was selected
+            if value != 'N/A':
                 try:
                     custom_alignments[type_id] = int(value)
                 except ValueError:
-                    pass  # Skip invalid values
+                    pass
 
         # Log alignment settings
         self.status_text.insert(tk.END, "\nBlock Alignment Settings:\n")
@@ -1725,21 +1854,32 @@ class RebuildWindow:
             self.status_text.insert(tk.END, f"  {type_names.get(type_id, f'Type {type_id}')}: {alignment} bytes\n")
         self.status_text.insert(tk.END, "\n")
 
-        # Perform rebuild
         self.status_text.insert(tk.END, "Rebuilding bundle file...\n")
         self.status_text.update()
 
-        # Dispatch to appropriate rebuild method based on bundle type
         if self.parser.bundle_type == 'vol':
             success = self.parser.rebuild_vol(output_path, self.parsed_files, replacement_dir)
         else:
-            # Pass custom alignments to rebuild function
             success = self.parser.rebuild_bdg(output_path, self.parsed_files, replacement_dir, custom_alignments)
 
         if success:
-            messagebox.showinfo("Success", f"Bundle file rebuilt successfully!\n\nSaved to: {output_path}")
+            final_path = output_path
+            if self.zip_source:
+                bundle_name = os.path.basename(output_path)
+                zip_name = os.path.splitext(bundle_name)[0] + '.zip'
+                zip_out = os.path.join(os.path.dirname(output_path), zip_name)
+                try:
+                    with zipfile.ZipFile(zip_out, 'w', zipfile.ZIP_DEFLATED) as zf:
+                        zf.write(output_path, bundle_name)
+                    os.remove(output_path)
+                    final_path = zip_out
+                    self.status_text.insert(tk.END, f"Re-packaged into ZIP: {zip_name}\n")
+                except Exception as zip_err:
+                    self.status_text.insert(tk.END, f"Warning: could not create ZIP: {zip_err}\n")
+
+            messagebox.showinfo("Success", f"Bundle rebuilt successfully!\n\nSaved to: {final_path}")
             self.status_text.insert(tk.END, f"✓ Bundle rebuilt successfully!\n")
-            self.output_text_callback(f"\nBundle rebuilt successfully: {output_path}\n")
+            self.output_text_callback(f"\nBundle rebuilt successfully: {final_path}\n")
         else:
             messagebox.showerror("Error", "Failed to rebuild bundle file. Check console for errors.")
             self.status_text.insert(tk.END, "✗ Failed to rebuild bundle file.\n")
@@ -1889,6 +2029,12 @@ class PipeworksGUI:
         self.parser = None
         self.parsed_files = []
         self.child_windows = []  # Track all child windows
+        self.bundle_files = []  # List of bundle files when directory selected
+        self.current_bundle_dir = None  # Current directory path
+        self.last_extract_dir = None  # Track last extraction directory for auto-populating rebuild
+        self._zip_temp_dirs = []  # Temp dirs created for ZIP extraction
+        self._current_zip_source = None  # ZIP path if currently selected item came from a ZIP
+        self._current_zip_bundle = None  # Extracted bundle path from current ZIP
 
         # Set up main window close handler
         self.root.protocol("WM_DELETE_WINDOW", self.on_main_window_close)
@@ -1912,7 +2058,7 @@ class PipeworksGUI:
         main_frame.rowconfigure(3, weight=1)
 
         # File input section
-        input_frame = ttk.LabelFrame(main_frame, text="Input File", padding="5")
+        input_frame = ttk.LabelFrame(main_frame, text="Input Bundle Directory", padding="5")
         input_frame.grid(row=0, column=0, sticky=(tk.W, tk.E), pady=(0, 10))
         input_frame.columnconfigure(0, weight=1)
 
@@ -1935,6 +2081,21 @@ class PipeworksGUI:
 
         self.rebuild_btn = ttk.Button(button_frame, text="Rebuild", command=self.rebuild_bdg)
         self.rebuild_btn.pack(side=tk.LEFT)
+
+        # Bundle selection frame (for directory mode)
+        self.bundle_select_frame = ttk.Frame(main_frame)
+        self.bundle_select_frame.grid(row=2, column=0, sticky=(tk.W, tk.E), pady=(0, 10))
+        self.bundle_select_frame.columnconfigure(1, weight=1)
+
+        self.bundle_label = ttk.Label(self.bundle_select_frame, text="Bundle:")
+        self.bundle_label.grid(row=0, column=0, padx=(0, 5))
+
+        self.bundle_dropdown = ttk.Combobox(self.bundle_select_frame, state='readonly')
+        self.bundle_dropdown.grid(row=0, column=1, sticky=(tk.W, tk.E))
+        self.bundle_dropdown.bind('<<ComboboxSelected>>', self.on_bundle_selected)
+
+        # Hide bundle selector by default
+        self.bundle_select_frame.grid_remove()
 
         # Output section
         output_frame = ttk.LabelFrame(main_frame, text="Output", padding="5")
@@ -2004,19 +2165,16 @@ class PipeworksGUI:
             else:
                 return
 
-            # Verify it's a valid file
-            if os.path.isfile(filepath):
-                # Temporarily enable entry to update value
+            # Accept a directory drop
+            if os.path.isdir(filepath):
                 self.file_entry.configure(state='normal')
                 self.file_path_var.set(filepath)
                 self.file_entry.configure(state='readonly')
-                self.output_text.insert(tk.END, f"File loaded via drag-drop: {filepath}\n")
-                print(f"File dropped: {filepath}")
-                # Auto-parse the file
-                self.parse_file()
+                self.output_text.insert(tk.END, f"Directory loaded via drag-drop: {filepath}\n")
+                self.load_directory(filepath)
             else:
-                self.output_text.insert(tk.END, f"Invalid file path: {filepath}\n")
-                print(f"Invalid file path from drop: {filepath}")
+                self.output_text.insert(tk.END, f"Please drop a directory, not an individual file.\n")
+                print(f"Dropped path is not a directory: {filepath}")
         except Exception as e:
             self.output_text.insert(tk.END, f"Error handling drop: {e}\n")
             print(f"Error handling drop: {e}")
@@ -2024,25 +2182,138 @@ class PipeworksGUI:
             traceback.print_exc()
 
     def browse_file(self):
-        """Open file dialog to select a file"""
-        filename = filedialog.askopenfilename(
-            parent=self.root,
-            title="Select Bundle File",
-            filetypes=[
-                ("Bundle Files", "*.BDG *.cmg *.cmp *.clp *.bdp *.VOL"),
-                ("BDG Files", "*.BDG"),
-                ("CMG Files", "*.cmg"),
-                ("CMP Files", "*.cmp"),
-                ("CLP Files", "*.clp"),
-                ("BDP Files", "*.bdp"),
-                ("VOL Files", "*.VOL"),
-                ("All Files", "*.*")
-            ]
+        """Open dialog to select a bundle directory"""
+        initialdir = self.current_bundle_dir or os.path.expanduser("~")
+        directory = _dialog(
+            self.root,
+            filedialog.askdirectory,
+            title="Select Bundle Directory",
+            initialdir=initialdir,
         )
-        if filename:
-            self.file_path_var.set(filename)
-            # Auto-parse the file
-            self.parse_file()
+        if directory:
+            self.load_directory(directory)
+
+    def _extract_zip_bundle(self, zip_path):
+        """
+        Extract the first supported bundle from a ZIP into a temp dir.
+        Returns (temp_dir, extracted_bundle_path) or (None, None) on failure.
+        Temp dir is tracked for cleanup on close.
+        """
+        if not zipfile.is_zipfile(zip_path):
+            messagebox.showerror("Invalid ZIP", f"Not a valid ZIP file: {zip_path}")
+            return None, None
+
+        bundle_extensions = ('.bdg', '.cmg', '.cmp', '.clp', '.bdp', '.bsf', '.vol', '.ccg', '.cmf', '.ccf')
+        temp_dir = tempfile.mkdtemp(prefix="gzbuildr_zip_")
+        self._zip_temp_dirs.append(temp_dir)
+        extracted = []
+
+        with zipfile.ZipFile(zip_path, 'r') as zf:
+            for member in zf.namelist():
+                if member.lower().endswith(bundle_extensions):
+                    dest = zf.extract(member, temp_dir)
+                    extracted.append(dest)
+
+        if not extracted:
+            messagebox.showinfo("No Bundles in ZIP",
+                "No supported bundle files found inside the ZIP.\n"
+                "Supported: .bdg .cmg .cmp .clp .bdp .bsf .vol .ccg .cmf .ccf")
+            shutil.rmtree(temp_dir, ignore_errors=True)
+            self._zip_temp_dirs.remove(temp_dir)
+            return None, None
+
+        return temp_dir, extracted[0]
+
+    def load_directory(self, directory, select_file=None):
+        """Load all bundle and ZIP files from a directory, including subdirectories"""
+        self.current_bundle_dir = directory
+        self.file_path_var.set(directory)
+
+        bundle_extensions = ('.bdg', '.cmg', '.cmp', '.clp', '.bdp', '.bsf', '.vol', '.ccg', '.cmf', '.ccf')
+        self.bundle_files = []
+
+        for root, dirs, files in os.walk(directory):
+            dirs.sort(key=str.lower)
+            for filename in sorted(files, key=str.lower):
+                if filename.lower().endswith(bundle_extensions) or filename.lower().endswith('.zip'):
+                    self.bundle_files.append(os.path.join(root, filename))
+
+        if not self.bundle_files:
+            messagebox.showinfo("No Bundles Found",
+                "No bundle or ZIP files found in selected directory.")
+            self.bundle_select_frame.grid_remove()
+            return
+
+        bundle_names = [
+            os.path.relpath(f, directory) for f in self.bundle_files
+        ]
+        self.bundle_dropdown['values'] = bundle_names
+
+        # Pre-select the file the user picked, if provided
+        if select_file:
+            select_rel = os.path.relpath(select_file, directory)
+            if select_rel in bundle_names:
+                self.bundle_dropdown.current(bundle_names.index(select_rel))
+            else:
+                self.bundle_dropdown.current(0)
+        else:
+            self.bundle_dropdown.current(0)
+
+        self.bundle_select_frame.grid()
+
+        self.on_bundle_selected(None)
+
+        self.output_text.insert(tk.END, f"Found {len(self.bundle_files)} file(s) in directory:\n")
+        for name in bundle_names:
+            self.output_text.insert(tk.END, f"  - {name}\n")
+        self.output_text.insert(tk.END, "\n")
+
+    def _cleanup_zip_temps(self):
+        """Remove all previously extracted ZIP temp directories"""
+        for temp_dir in self._zip_temp_dirs[:]:
+            try:
+                shutil.rmtree(temp_dir, ignore_errors=True)
+            except Exception:
+                pass
+        self._zip_temp_dirs.clear()
+        self._current_zip_source = None
+        self._current_zip_bundle = None
+
+    def on_bundle_selected(self, event):
+        """Handle bundle selection from dropdown"""
+        if not self.bundle_files:
+            return
+
+        selected_index = self.bundle_dropdown.current()
+        if selected_index < 0:
+            return
+
+        selected_file = self.bundle_files[selected_index]
+
+        # Clean up temp dirs from any previous ZIP extraction before loading new bundle
+        self._cleanup_zip_temps()
+
+        if selected_file.lower().endswith('.zip'):
+            # Extract bundle from ZIP into temp dir, then parse it
+            try:
+                temp_dir, bundle_path = self._extract_zip_bundle(selected_file)
+                if bundle_path is None:
+                    return
+                self.output_text.insert(tk.END,
+                    f"ZIP: {os.path.basename(selected_file)} -> {os.path.basename(bundle_path)}\n")
+                # Store the actual bundle path but remember it came from a ZIP
+                self._current_zip_source = selected_file
+                self._current_zip_bundle = bundle_path
+                self.file_path_var.set(bundle_path)
+            except Exception as e:
+                messagebox.showerror("ZIP Error", f"Failed to open ZIP:\n{e}")
+                return
+        else:
+            self._current_zip_source = None
+            self._current_zip_bundle = None
+            self.file_path_var.set(selected_file)
+
+        self.parse_file()
 
     def parse_file(self):
         """Parse the selected file and display results"""
@@ -2062,9 +2333,13 @@ class PipeworksGUI:
         self.output_text.delete(1.0, tk.END)
         self.output_text.insert(tk.END, f"Parsing: {os.path.basename(filepath)}\n")
 
-        # Add warning for .cmp files
-        if filepath.lower().endswith(('.cmp', '.clp', '.bdp')):
+        # Add warning for PS2 bundle files
+        if filepath.lower().endswith(('.cmp', '.clp', '.bdp', '.bsf')):
             self.output_text.insert(tk.END, "\n⚠ WARNING: If modding Save The Earth, STE's engine has a limit of 2,130KB. \n[Unleashed PS2 does NOT have this limit.] \n")
+        elif filepath.lower().endswith(('.ccg',)):
+            self.output_text.insert(tk.END, "\n[GameCube Stage Bundle (.ccg)]\n")
+        elif filepath.lower().endswith(('.cmf', '.ccf')):
+            self.output_text.insert(tk.END, "\n[Xbox DAMM Bundle (.cmf/.ccf)]\n")
 
         self.output_text.insert(tk.END, "=" * 80 + "\n\n")
 
@@ -2113,8 +2388,12 @@ class PipeworksGUI:
         def output_callback(text):
             self.output_text.insert(tk.END, text)
 
+        # Create callback to track last extraction directory
+        def extract_dir_callback(dir_path):
+            self.last_extract_dir = dir_path
+
         # Create non-modal extract window
-        window = ExtractWindow(self.root, self.parsed_files, self.parser, output_callback)
+        window = ExtractWindow(self.root, self.parsed_files, self.parser, output_callback, extract_dir_callback)
         self.child_windows.append(window.window)
 
         # Remove from list when window is closed
@@ -2134,10 +2413,16 @@ class PipeworksGUI:
         # Allow opening rebuild window even without parsed files
         # If no parsed files, it will build from scratch
         if self.parsed_files and self.parser:
-            window = RebuildWindow(self.root, self.parsed_files, self.parser, output_callback)
+            # Pass bulk bundle list if available
+            window = RebuildWindow(self.root, self.parsed_files, self.parser, output_callback,
+                                   bulk_bundles=self.bundle_files if self.bundle_files else None,
+                                   last_extract_dir=self.last_extract_dir,
+                                   zip_source=self._current_zip_source)
         else:
             # Build from scratch mode (no parsed files)
-            window = RebuildWindow(self.root, None, None, output_callback)
+            window = RebuildWindow(self.root, None, None, output_callback, bulk_bundles=None,
+                                   last_extract_dir=self.last_extract_dir,
+                                   zip_source=None)
 
         self.child_windows.append(window.window)
 
@@ -2151,13 +2436,13 @@ class PipeworksGUI:
 
     def on_main_window_close(self):
         """Close all child windows when main window closes"""
-        # Close all child windows
-        for window in self.child_windows[:]:  # Use slice to iterate over copy
+        for window in self.child_windows[:]:
             try:
                 window.destroy()
             except:
                 pass
-        # Close main window
+        # Clean up any temp directories from ZIP extraction
+        self._cleanup_zip_temps()
         self.root.destroy()
 
 
