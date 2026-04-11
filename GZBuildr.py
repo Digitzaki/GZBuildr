@@ -2336,7 +2336,7 @@ class PipeworksGUI:
 
         # Add warning for PS2 bundle files
         if filepath.lower().endswith(('.cmp', '.clp', '.bdp', '.bsf')):
-            self.output_text.insert(tk.END, "\n⚠ WARNING: If modding Save The Earth, STE's engine has a limit of 2,130KB. \n[Unleashed PS2 does NOT have this limit.] \n")
+            self.output_text.insert(tk.END, "\n⚠ WARNING: If modding PS2: Engine has a limit of 2,130KB.\n")
         elif filepath.lower().endswith(('.clf',)):
             self.output_text.insert(tk.END, "\n[Xbox Bundle (.clf)]\n")
         elif filepath.lower().endswith(('.bdl',)):
