@@ -1202,9 +1202,9 @@ class ExtractWindow:
 
         self.window = tk.Toplevel(parent)
         self.window.title("Extract Files")
-        self.window.geometry("800x600")
+        self.window.geometry("800x750")
         self.window.resizable(True, True)
-        self.window.minsize(600, 400)
+        self.window.minsize(600, 500)
         # Remove grab_set() to allow non-modal behavior
 
         main_frame = ttk.Frame(self.window, padding="10")
@@ -1296,8 +1296,10 @@ class ExtractWindow:
         self.check_vars = {}
         self.category_vars = {}
         self.category_expanded = {}
+        self.category_user_expanded = set()  # tracks categories the user manually expanded
         self.category_frames = {}
         self.category_content_frames = {}
+        self.file_widgets = {}
 
         # Create collapsible sections for each file type/extension
         # Sort by extension name (alphabetically) for VOL, or by type number for Pipeworks
@@ -1349,6 +1351,7 @@ class ExtractWindow:
             self.category_frames[group_key] = {
                 'arrow': arrow_label,
                 'content': content_frame,
+                'container': category_container,
                 'loaded': False
             }
 
@@ -1384,6 +1387,17 @@ class ExtractWindow:
         extract_btn = ttk.Button(button_frame, text="Extract Selected", command=self.extract)
         extract_btn.pack(side=tk.RIGHT, padx=(5, 0))
 
+        # Search filter
+        search_frame = ttk.Frame(main_frame)
+        search_frame.pack(fill=tk.X, pady=(8, 0))
+
+        ttk.Label(search_frame, text="Search:").pack(side=tk.LEFT, padx=(0, 5))
+
+        self.search_var = tk.StringVar()
+        self.search_var.trace_add('write', lambda *args: self.apply_search_filter())
+        search_entry = ttk.Entry(search_frame, textvariable=self.search_var)
+        search_entry.pack(side=tk.LEFT, fill=tk.X, expand=True)
+
     def toggle_category_expand(self, group_key, arrow_label, content_frame):
         """Expand or collapse a category"""
         is_expanded = self.category_expanded[group_key]
@@ -1393,11 +1407,13 @@ class ExtractWindow:
             content_frame.pack_forget()
             arrow_label.config(text="▶")
             self.category_expanded[group_key] = False
+            self.category_user_expanded.discard(group_key)
         else:
             # Expand
             content_frame.pack(fill=tk.X, padx=10, pady=5)
             arrow_label.config(text="▼")
             self.category_expanded[group_key] = True
+            self.category_user_expanded.add(group_key)
 
             # Lazy load checkboxes if not already loaded
             if not self.category_frames[group_key]['loaded']:
@@ -1417,10 +1433,15 @@ class ExtractWindow:
             command=lambda: self.toggle_category_selection(group_key)
         )
         category_cb.pack(anchor=tk.W, pady=(0, 5))
+        self.category_frames[group_key]['category_cb'] = category_cb
 
         # Initialize check_vars dict for this category
         if group_key not in self.check_vars:
             self.check_vars[group_key] = []
+
+        # Initialize file_widgets dict for this category (for search filtering)
+        if group_key not in self.file_widgets:
+            self.file_widgets[group_key] = []
 
         # Individual file checkboxes
         for entry in entries:
@@ -1437,6 +1458,64 @@ class ExtractWindow:
                 variable=var
             )
             cb.pack(anchor=tk.W, pady=1)
+            self.file_widgets[group_key].append((cb, display_name.lower()))
+
+    def apply_search_filter(self):
+        """Filter visible file checkboxes based on search text"""
+        query = self.search_var.get().lower().strip()
+
+        for group_key, frame_info in self.category_frames.items():
+            container = frame_info.get('container')
+            if not container:
+                continue
+
+            if not frame_info['loaded']:
+                if query:
+                    # Force-load and expand so results can be shown
+                    content_frame = frame_info['content']
+                    self.load_category_files(group_key, content_frame)
+                    frame_info['loaded'] = True
+                    content_frame.pack(fill=tk.X, padx=10, pady=5)
+                    frame_info['arrow'].config(text="▼")
+                    self.category_expanded[group_key] = True
+                else:
+                    continue
+
+            widgets = self.file_widgets.get(group_key, [])
+            any_visible = False
+
+            for cb, name_lower in widgets:
+                if not query or query in name_lower:
+                    cb.pack(anchor=tk.W, pady=1)
+                    any_visible = True
+                else:
+                    cb.pack_forget()
+
+            # Show/hide the "Select All in Category" checkbox
+            category_cb = frame_info.get('category_cb')
+            if category_cb:
+                if any_visible:
+                    category_cb.pack(anchor=tk.W, pady=(0, 5))
+                else:
+                    category_cb.pack_forget()
+
+            # Expand/collapse category based on matches when filtering
+            if query:
+                if any_visible:
+                    content_frame = frame_info['content']
+                    content_frame.pack(fill=tk.X, padx=10, pady=5)
+                    frame_info['arrow'].config(text="▼")
+                    container.pack(fill=tk.X, padx=5, pady=2)
+                else:
+                    container.pack_forget()
+            else:
+                # Restore collapsed state for categories not manually expanded by user
+                content_frame = frame_info['content']
+                if group_key not in self.category_user_expanded:
+                    content_frame.pack_forget()
+                    frame_info['arrow'].config(text="▶")
+                    self.category_expanded[group_key] = False
+                container.pack(fill=tk.X, padx=5, pady=2)
 
     def update_selection_count(self):
         """Update the status label with current selection count"""
@@ -1556,12 +1635,28 @@ class RebuildWindow:
 
         self.window = tk.Toplevel(parent)
         self.window.title("Build Bundle from Directory" if self.build_from_scratch else "Rebuild Bundle")
-        self.window.geometry("800x600")
+        self.window.geometry("800x870")
         self.window.resizable(True, True)
-        self.window.minsize(600, 400)
+        self.window.minsize(600, 600)
 
-        main_frame = ttk.Frame(self.window, padding="10")
-        main_frame.pack(fill=tk.BOTH, expand=True)
+        self.main_frame = ttk.Frame(self.window, padding="10")
+        self.main_frame.pack(fill=tk.BOTH, expand=True)
+        main_frame = self.main_frame
+
+        # Mode toggle (only show when bulk bundles are available and not build-from-scratch)
+        self.bulk_mode = tk.BooleanVar(value=False)
+        if self.bulk_bundles and not self.build_from_scratch:
+            mode_frame = ttk.Frame(main_frame)
+            mode_frame.pack(fill=tk.X, pady=(0, 8))
+
+            self._mode_desc_var = tk.StringVar(value="Individual - rebuild current bundle only")
+            self._mode_cb = ttk.Checkbutton(
+                mode_frame,
+                textvariable=self._mode_desc_var,
+                variable=self.bulk_mode,
+                command=self._on_mode_change
+            )
+            self._mode_cb.pack(anchor=tk.W)
 
         # Instructions
         if self.build_from_scratch:
@@ -1585,29 +1680,41 @@ class RebuildWindow:
         repl_browse_btn = ttk.Button(repl_frame, text="Browse", command=self.browse_replacement_dir)
         repl_browse_btn.grid(row=0, column=1)
 
-        # Output file section
-        output_frame = ttk.LabelFrame(main_frame, text="Output Bundle File", padding="5")
-        output_frame.pack(fill=tk.X, pady=(0, 10))
-        output_frame.columnconfigure(0, weight=1)
+        # Output file section (Individual mode)
+        self.output_file_frame = ttk.LabelFrame(main_frame, text="Output Bundle File", padding="5")
+        self.output_file_frame.pack(fill=tk.X, pady=(0, 10))
+        self.output_file_frame.columnconfigure(0, weight=1)
 
         self.output_file_var = tk.StringVar()
         self.output_file_var.trace_add('write', lambda *args: self.update_alignments_on_file_change())
-        output_entry = ttk.Entry(output_frame, textvariable=self.output_file_var, state='readonly')
+        output_entry = ttk.Entry(self.output_file_frame, textvariable=self.output_file_var, state='readonly')
         output_entry.grid(row=0, column=0, sticky=(tk.W, tk.E), padx=(0, 5))
 
-        output_browse_btn = ttk.Button(output_frame, text="Browse", command=self.browse_output_file)
+        output_browse_btn = ttk.Button(self.output_file_frame, text="Browse", command=self.browse_output_file)
         output_browse_btn.grid(row=0, column=1)
 
+        # Output directory section (Bulk mode)
+        self.output_dir_frame = ttk.LabelFrame(main_frame, text="Output Directory", padding="5")
+        self.output_dir_frame.columnconfigure(0, weight=1)
+
+        self.output_dir_var = tk.StringVar()
+        output_dir_entry = ttk.Entry(self.output_dir_frame, textvariable=self.output_dir_var, state='readonly')
+        output_dir_entry.grid(row=0, column=0, sticky=(tk.W, tk.E), padx=(0, 5))
+
+        output_dir_browse_btn = ttk.Button(self.output_dir_frame, text="Browse", command=self.browse_output_dir)
+        output_dir_browse_btn.grid(row=0, column=1)
+
         # Create two-column layout: alignment controls on left, status on right
-        content_frame = ttk.Frame(main_frame)
+        self.content_frame = ttk.Frame(main_frame)
+        content_frame = self.content_frame
         content_frame.pack(fill=tk.BOTH, expand=True, pady=(0, 10))
         content_frame.columnconfigure(0, weight=0)  # Alignment controls - fixed width
         content_frame.columnconfigure(1, weight=1)  # Status - expandable
         content_frame.rowconfigure(0, weight=1)
 
         # Left side: Block Alignment controls
-        alignment_frame = ttk.LabelFrame(content_frame, text="Block Alignment", padding="10")
-        alignment_frame.grid(row=0, column=0, sticky=(tk.N, tk.S, tk.W), padx=(0, 10))
+        self.alignment_frame = ttk.LabelFrame(content_frame, text="Block Alignment", padding="10")
+        self.alignment_frame.grid(row=0, column=0, sticky=(tk.N, tk.S, tk.W), padx=(0, 10))
 
         # Alignment options
         alignment_values = [16, 32, 64, 128, 256, 512, 1024, 2048]
@@ -1629,14 +1736,14 @@ class RebuildWindow:
         # Create dropdowns for each file type
         for idx, (type_name, type_id) in enumerate(file_types):
             # Label
-            label = ttk.Label(alignment_frame, text=type_name, width=15, anchor='w')
+            label = ttk.Label(self.alignment_frame, text=type_name, width=15, anchor='w')
             label.grid(row=idx, column=0, sticky=tk.W, pady=3, padx=(0, 10))
 
             # Dropdown - initially show N/A
             var = tk.StringVar(value='N/A')
             self.alignment_vars[type_id] = var
             dropdown = ttk.Combobox(
-                alignment_frame,
+                self.alignment_frame,
                 textvariable=var,
                 values=['N/A'],
                 state='disabled',
@@ -1646,11 +1753,19 @@ class RebuildWindow:
             self.alignment_dropdowns[type_id] = dropdown
 
         # Add separator line and extension detected label
-        separator_frame = ttk.Frame(alignment_frame, height=2, relief=tk.SUNKEN)
+        separator_frame = ttk.Frame(self.alignment_frame, height=2, relief=tk.SUNKEN)
         separator_frame.grid(row=len(file_types), column=0, columnspan=2, sticky=(tk.W, tk.E), pady=(10, 5))
 
-        self.extension_label = ttk.Label(alignment_frame, text="", foreground='red', font=('TkDefaultFont', 9))
+        self.extension_label = ttk.Label(self.alignment_frame, text="", foreground='red', font=('TkDefaultFont', 9))
         self.extension_label.grid(row=len(file_types) + 1, column=0, columnspan=2, sticky=tk.W, pady=(5, 0))
+
+        self.bulk_align_note = ttk.Label(
+            self.alignment_frame,
+            text="Auto-detected\nper bundle",
+            foreground='gray',
+            font=('TkDefaultFont', 9),
+            justify=tk.CENTER
+        )
 
         # Right side: Status section
         status_frame = ttk.LabelFrame(content_frame, text="Status", padding="5")
@@ -1673,6 +1788,38 @@ class RebuildWindow:
 
         self.rebuild_btn = ttk.Button(button_frame, text="Rebuild Bundle", command=self.rebuild)
         self.rebuild_btn.pack(side=tk.RIGHT)
+
+    def _on_mode_change(self):
+        """Switch UI between Individual and Bulk modes"""
+        if self.bulk_mode.get():
+            n = len(self.bulk_bundles) if self.bulk_bundles else 0
+            self._mode_desc_var.set(f"Bulk - rebuild all {n} bundle(s) in directory, injecting matching mod files into each")
+            self.output_file_frame.pack_forget()
+            self.output_dir_frame.pack(fill=tk.X, pady=(0, 10), before=self.content_frame)
+            file_types_ordered = [0, 6, 9, 13, 17, 20]
+            for idx, type_id in enumerate(file_types_ordered):
+                if type_id in self.alignment_dropdowns:
+                    label_widgets = self.alignment_frame.grid_slaves(row=idx, column=0)
+                    if label_widgets:
+                        label_widgets[0].grid_remove()
+                    self.alignment_dropdowns[type_id].grid_remove()
+            self.extension_label.config(text="")
+            self.bulk_align_note.grid(row=0, column=0, columnspan=2, rowspan=len(self.alignment_vars),
+                                      sticky=tk.NSEW, pady=10)
+            self.rebuild_btn.config(text="Bulk Rebuild")
+        else:
+            self._mode_desc_var.set("Individual - rebuild current bundle only")
+            self.output_dir_frame.pack_forget()
+            self.output_file_frame.pack(fill=tk.X, pady=(0, 10), before=self.content_frame)
+            self.bulk_align_note.grid_remove()
+            file_types_ordered = [0, 6, 9, 13, 17, 20]
+            for idx, type_id in enumerate(file_types_ordered):
+                if type_id in self.alignment_dropdowns:
+                    label_widgets = self.alignment_frame.grid_slaves(row=idx, column=0)
+                    if label_widgets:
+                        label_widgets[0].grid()
+                    self.alignment_dropdowns[type_id].grid()
+            self.rebuild_btn.config(text="Rebuild Bundle")
 
     def set_default_alignments(self):
         """Set default alignment values based on file extension"""
@@ -1784,6 +1931,23 @@ class RebuildWindow:
             self.repl_dir_var.set(directory)
             self.status_text.insert(tk.END, f"Replacement directory: {directory}\n")
 
+    def browse_output_dir(self):
+        """Browse for bulk output directory"""
+        initial = (
+            self.output_dir_var.get()
+            or (os.path.dirname(self.parser.filepath) if self.parser and hasattr(self.parser, 'filepath') else None)
+            or os.path.expanduser("~")
+        )
+        directory = _dialog(
+            self.window,
+            filedialog.askdirectory,
+            title="Select Output Directory for Rebuilt Bundles",
+            initialdir=initial,
+        )
+        if directory:
+            self.output_dir_var.set(directory)
+            self.status_text.insert(tk.END, f"Output directory: {directory}\n")
+
     def browse_output_file(self):
         """Browse for output bundle file location"""
         # Derive default filename and extension from the bundle being parsed
@@ -1821,14 +1985,59 @@ class RebuildWindow:
             self.output_file_var.set(filepath)
             self.status_text.insert(tk.END, f"Output file: {filepath}\n")
 
+    def _get_mod_filenames(self, replacement_dir):
+        """Return a set of lowercase filenames present in the replacement directory"""
+        try:
+            return {f.lower() for f in os.listdir(replacement_dir) if os.path.isfile(os.path.join(replacement_dir, f))}
+        except Exception:
+            return set()
+
+    def _bundle_has_matches(self, bundle_path, mod_filenames):
+        """Return True if any entry in the bundle matches a mod filename.
+        Handles both direct bundle files and ZIP-wrapped bundles."""
+        try:
+            actual_path = bundle_path
+            tmp_dir = None
+
+            if bundle_path.lower().endswith('.zip'):
+                tmp_dir = tempfile.mkdtemp()
+                bundle_extensions = ('.bdg', '.cmg', '.cmp', '.clp', '.clf', '.bdp', '.bdl', '.bsf', '.vol', '.ccg', '.cmf', '.ccf')
+                with zipfile.ZipFile(bundle_path, 'r') as zf:
+                    for member in zf.namelist():
+                        if member.lower().endswith(bundle_extensions):
+                            zf.extract(member, tmp_dir)
+                            actual_path = os.path.join(tmp_dir, member)
+                            break
+                    else:
+                        return False
+
+            tmp_parser = PipeworksParser(actual_path)
+            entries = tmp_parser.parse()
+            if not entries or (len(entries) == 1 and 'error' in entries[0]):
+                return False
+            for entry in entries:
+                if entry.get('name', '').lower() in mod_filenames:
+                    return True
+        except Exception:
+            pass
+        finally:
+            if tmp_dir:
+                shutil.rmtree(tmp_dir, ignore_errors=True)
+        return False
+
     def rebuild(self):
         """Perform the rebuild operation"""
         replacement_dir = self.repl_dir_var.get()
-        output_path = self.output_file_var.get()
 
         if not replacement_dir:
             messagebox.showwarning("Missing Input", "Please select a replacement files directory.")
             return
+
+        if self.bulk_mode.get():
+            self._bulk_rebuild(replacement_dir)
+            return
+
+        output_path = self.output_file_var.get()
 
         if not output_path:
             messagebox.showwarning("Missing Input", "Please select an output file location.")
@@ -1885,6 +2094,118 @@ class RebuildWindow:
             messagebox.showerror("Error", "Failed to rebuild bundle file. Check console for errors.")
             self.status_text.insert(tk.END, "✗ Failed to rebuild bundle file.\n")
             self.output_text_callback("Failed to rebuild bundle file.\n")
+
+    def _bulk_rebuild(self, replacement_dir):
+        """Rebuild all bundles in bulk_bundles that contain at least one matching mod file"""
+        output_dir = self.output_dir_var.get()
+        if not output_dir:
+            messagebox.showwarning("Missing Input", "Please select an output directory.")
+            return
+
+        if not self.bulk_bundles:
+            messagebox.showwarning("No Bundles", "No bundles are loaded for bulk rebuild.")
+            return
+
+        mod_filenames = self._get_mod_filenames(replacement_dir)
+        if not mod_filenames:
+            messagebox.showwarning("No Mod Files", "No files found in the replacement directory.")
+            return
+
+        self.status_text.insert(tk.END, f"\n=== Bulk Rebuild ===\n")
+        self.status_text.insert(tk.END, f"Replacement dir: {replacement_dir}\n")
+        self.status_text.insert(tk.END, f"Output dir:      {output_dir}\n")
+        self.status_text.insert(tk.END, f"Mod files found: {len(mod_filenames)}\n")
+        self.status_text.insert(tk.END, f"Bundles to scan: {len(self.bulk_bundles)}\n\n")
+        self.status_text.update()
+        self.rebuild_btn.config(state='disabled')
+
+        rebuilt = 0
+        skipped = 0
+        failed = 0
+
+        for bundle_path in self.bulk_bundles:
+            bundle_name = os.path.basename(bundle_path)
+            self.status_text.insert(tk.END, f"[ {bundle_name} ]\n")
+            self.status_text.update()
+
+            if not self._bundle_has_matches(bundle_path, mod_filenames):
+                self.status_text.insert(tk.END, f"  -> No matching mod files - skipped\n\n")
+                skipped += 1
+                continue
+
+            is_zip = bundle_path.lower().endswith('.zip')
+            tmp_dir = None
+
+            try:
+                actual_bundle_path = bundle_path
+                inner_bundle_name = bundle_name
+
+                if is_zip:
+                    tmp_dir = tempfile.mkdtemp()
+                    bundle_extensions = ('.bdg', '.cmg', '.cmp', '.clp', '.clf', '.bdp', '.bdl', '.bsf', '.vol', '.ccg', '.cmf', '.ccf')
+                    with zipfile.ZipFile(bundle_path, 'r') as zf:
+                        for member in zf.namelist():
+                            if member.lower().endswith(bundle_extensions):
+                                zf.extract(member, tmp_dir)
+                                actual_bundle_path = os.path.join(tmp_dir, member)
+                                inner_bundle_name = os.path.basename(member)
+                                break
+                        else:
+                            self.status_text.insert(tk.END, f"  -> No bundle inside ZIP - skipped\n\n")
+                            skipped += 1
+                            continue
+
+                tmp_output_path = os.path.join(tmp_dir if is_zip else output_dir, inner_bundle_name) if is_zip else os.path.join(output_dir, inner_bundle_name)
+
+                tmp_parser = PipeworksParser(actual_bundle_path)
+                tmp_entries = tmp_parser.parse()
+
+                if not tmp_entries or (len(tmp_entries) == 1 and 'error' in tmp_entries[0]):
+                    self.status_text.insert(tk.END, f"  -> Parse error - skipped\n\n")
+                    skipped += 1
+                    continue
+
+                if tmp_parser.bundle_type == 'vol':
+                    success = tmp_parser.rebuild_vol(tmp_output_path, tmp_entries, replacement_dir)
+                else:
+                    success = tmp_parser.rebuild_bdg(tmp_output_path, tmp_entries, replacement_dir)
+
+                if success:
+                    if is_zip:
+                        zip_out_name = os.path.splitext(bundle_name)[0] + '.zip'
+                        zip_out = os.path.join(output_dir, zip_out_name)
+                        with zipfile.ZipFile(zip_out, 'w', zipfile.ZIP_DEFLATED) as zf:
+                            zf.write(tmp_output_path, inner_bundle_name)
+                        final_out = zip_out
+                    else:
+                        final_out = tmp_output_path
+
+                    self.status_text.insert(tk.END, f"  -> Rebuilt OK: {os.path.basename(final_out)}\n\n")
+                    rebuilt += 1
+                else:
+                    self.status_text.insert(tk.END, f"  -> Rebuild FAILED\n\n")
+                    failed += 1
+
+            except Exception as exc:
+                self.status_text.insert(tk.END, f"  -> Error: {exc}\n\n")
+                failed += 1
+            finally:
+                if tmp_dir:
+                    shutil.rmtree(tmp_dir, ignore_errors=True)
+
+            self.status_text.update()
+
+        self.rebuild_btn.config(state='normal')
+
+        summary = (
+            f"Bulk rebuild complete!\n\n"
+            f"Rebuilt:  {rebuilt}\n"
+            f"Skipped (no matches): {skipped}\n"
+            f"Failed:   {failed}"
+        )
+        self.status_text.insert(tk.END, f"=== Done ===\n{summary}\n")
+        self.output_text_callback(f"\nBulk rebuild complete - {rebuilt} rebuilt, {skipped} skipped, {failed} failed\n")
+        messagebox.showinfo("Bulk Rebuild Complete", summary)
 
     def build_from_directory(self, source_dir, output_path):
         """Build a new VOL bundle from directory without needing a parsed file"""
@@ -2336,7 +2657,7 @@ class PipeworksGUI:
 
         # Add warning for PS2 bundle files
         if filepath.lower().endswith(('.cmp', '.clp', '.bdp', '.bsf')):
-            self.output_text.insert(tk.END, "\n⚠ WARNING: If modding PS2: Engine has a limit of 2,130KB.\n")
+            self.output_text.insert(tk.END, "\n⚠ WARNING: If modding PS2, engine has a limit of 2,130KB. \n[STE and Unleashed PS2] \n")
         elif filepath.lower().endswith(('.clf',)):
             self.output_text.insert(tk.END, "\n[Xbox Bundle (.clf)]\n")
         elif filepath.lower().endswith(('.bdl',)):
