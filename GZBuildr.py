@@ -522,71 +522,6 @@ class PipeworksParser:
 
         return issues, warnings
 
-    def validate_model_replacement(self, original_data, replacement_data, filename):
-        """Validate model/mesh replacement for common issues"""
-        issues = []
-        warnings = []
-
-        original_size = len(original_data)
-        replacement_size = len(replacement_data)
-
-        # CRITICAL: Mesh files contain internal offsets to vertex/index/submesh data
-        # Changing the file size breaks these offsets, causing massive deformation
-        if replacement_size > original_size:
-            issues.append(f"CRITICAL: Model is LARGER than original ({replacement_size} > {original_size} bytes)")
-            issues.append("Mesh files have internal offsets that break when size changes")
-            issues.append("This causes vertices to be read from wrong locations → massive stretching")
-            issues.append("SOLUTION: Reduce model complexity, lower poly count, or compress")
-            issues.append("Models CANNOT exceed their original file size")
-
-        # Check for internal pointers/offsets (common in model files)
-        # Look for patterns that might indicate offset tables at the start
-        if len(replacement_data) >= 16:
-            # Check first 16 bytes for values that look like offsets
-            potential_offsets = []
-            for i in range(0, min(64, len(replacement_data)), 4):
-                val = struct.unpack('<I', replacement_data[i:i+4])[0]
-                # Offsets typically point within the file
-                if 16 < val < len(replacement_data):
-                    potential_offsets.append(val)
-
-            if len(potential_offsets) >= 3:
-                warnings.append(f"Detected {len(potential_offsets)} internal offset pointers")
-                if replacement_size != original_size:
-                    issues.append("Size changed in file with internal offsets!")
-                    issues.append("Vertex/index/submesh data will be read from wrong locations")
-
-        # Check for size change
-        if replacement_size != original_size and replacement_size < original_size:
-            size_diff_pct = abs(replacement_size - original_size) / original_size * 100
-
-            if size_diff_pct > 50:
-                warnings.append(f"Large size reduction: {original_size} -> {replacement_size} ({size_diff_pct:.1f}%)")
-                warnings.append("Will be padded to original size to preserve mesh structure")
-
-        return issues, warnings
-
-    def pad_model_to_block_size(self, data, original_size):
-        """Pad model data to match original block size to prevent stretching"""
-        # Models must maintain exact block sizes or they stretch/deform
-        # Common model block sizes: 512, 1024, 2048, 4096, 8192
-
-        data_size = len(data)
-
-        # If replacement is larger than original, we can't safely pad
-        if data_size > original_size:
-            return data
-
-        # Pad to match original size exactly to preserve scale/transform data positions
-        if data_size < original_size:
-            padding_needed = original_size - data_size
-            # Pad with zeros to reach original size
-            padded_data = bytearray(data)
-            padded_data.extend(b'\x00' * padding_needed)
-            return bytes(padded_data)
-
-        return data
-
     def get_alignment_for_type(self, file_type, detected_alignment):
         """Get appropriate alignment for file type, with CMG/CMP-specific handling"""
 
@@ -743,82 +678,23 @@ class PipeworksParser:
                             file_data = self.read_replacement_file(replacement_path)
                             original_data = self.read_bytes(entry['offset'], entry['size'])
 
-                            original_size = len(file_data)
                             size_changed = len(file_data) != entry['size']
-                            already_printed = False  # Track if we already printed status
-
-                            # Validate replacement based on file type
                             issues = []
                             warnings = []
 
                             if entry['file_type'] == 9:  # Texture
                                 issues, warnings = self.validate_texture_replacement(original_data, file_data, entry['name'])
-                            elif entry['file_type'] in [0, 17]:  # Static/Rigged Mesh
-                                issues, warnings = self.validate_model_replacement(original_data, file_data, entry['name'])
 
-                                # CRITICAL: Pad models to original size to prevent stretching/deformation
-                                if len(file_data) != entry['size']:
-                                    if len(file_data) > entry['size']:
-                                        # Model is too large - MUST use original to prevent stretching
-                                        issues.append(f"Model EXCEEDS original size by {len(file_data) - entry['size']} bytes")
-                                        issues.append("Using ORIGINAL model to prevent map-wide stretching/deformation")
-
-                                        # Print errors BEFORE falling back
-                                        file_display = entry['name']
-                                        if actual_name != entry['name']:
-                                            file_display = f"{entry['name']} → {actual_name}"
-                                        print(f"  File {file_num} ({file_display}): REJECTED - replacement too large!")
-                                        for issue in issues:
-                                            print(f"    ⚠ {issue}")
-                                        for warning in warnings:
-                                            print(f"    ⓘ {warning}")
-
-                                        # Fall back to original data
-                                        file_data = original_data
-                                        issues = []  # Clear issues since we're using original
-                                        warnings = []
-                                        size_changed = False
-                                        already_printed = True  # Already printed rejection message
-                                        print(f"    → Using original model, size {len(file_data)}")
-                                    else:
-                                        # Pad to original size
-                                        file_data = self.pad_model_to_block_size(file_data, entry['size'])
-                                        warnings.append(f"Padded model from {original_size} to {len(file_data)} bytes to prevent stretching")
-                                        size_changed = False  # After padding, size matches
-                            elif size_changed:
-                                # Generic validation for other file types
-                                size_diff_pct = abs(len(file_data) - entry['size']) / entry['size'] * 100
-                                if size_diff_pct > 10:
-                                    warnings.append(f"Size changed: {entry['size']} -> {len(file_data)} ({size_diff_pct:.1f}%)")
-
-                            # Print status (only if not already printed)
-                            if not already_printed:
-                                status = "replacement" if size_changed else "replacement (same size)"
-                                size_info = f"size {len(file_data)}"
-                                if entry['file_type'] in [0, 17] and len(file_data) == entry['size'] and original_size != entry['size']:
-                                    size_info = f"size {len(file_data)} (padded from {original_size})"
-
-                                # Show if using alternative file
-                                file_display = entry['name']
-                                if actual_name != entry['name']:
-                                    file_display = f"{entry['name']} → {actual_name}"
-
-                                print(f"  File {file_num} ({file_display}): Using {status}, {size_info}, align {file_alignment}")
-
-                                # Print issues and warnings
-                                for issue in issues:
-                                    print(f"    ⚠ CRITICAL: {issue}")
-                                for warning in warnings:
-                                    print(f"    ⓘ {warning}")
-
-                            if issues:
-                                print(f"    ⚠ File may cause rendering issues or crashes!")
+                            status = "replacement" if size_changed else "replacement (same size)"
+                            file_display = entry['name'] if actual_name == entry['name'] else f"{entry['name']} → {actual_name}"
+                            print(f"  File {file_num} ({file_display}): Using {status}, size {len(file_data)}, align {file_alignment}")
+                            for issue in issues:
+                                print(f"    ⚠ CRITICAL: {issue}")
+                            for warning in warnings:
+                                print(f"    ⓘ {warning}")
                         else:
                             file_data = self.read_bytes(entry['offset'], entry['size'])
-                            type_info = ""
-                            if entry['file_type'] in [0, 17]:
-                                type_info = f" [Model: original size={entry['size']}]"
-                            print(f"  File {file_num} ({entry['name']}): Using original, size {len(file_data)}, align {file_alignment}{type_info}")
+                            print(f"  File {file_num} ({entry['name']}): Using original, size {len(file_data)}, align {file_alignment}")
 
                         # Calculate new offset with proper alignment
                         current_pos = len(new_file_data)
@@ -850,55 +726,20 @@ class PipeworksParser:
                             resource_data = self.read_replacement_file(replacement_path)
                             original_data = self.read_bytes(entry['offset'], entry['size'])
 
-                            original_res_size = len(resource_data)
                             size_changed = len(resource_data) != entry['size']
-                            res_already_printed = False
-
-                            # Validate resource based on file type
                             issues = []
                             warnings = []
 
                             if entry['file_type'] == 9:  # Texture resource (likely mipmaps)
                                 issues, warnings = self.validate_texture_replacement(original_data, resource_data, entry['name'])
-                                if size_changed:
-                                    issues.append("Texture resource size changed - this often contains mipmap data!")
-                                    issues.append("Missing mipmaps will cause low-resolution rendering at distance")
-                            elif entry['file_type'] in [0, 17]:  # Model resource
-                                # Models resources also need size preservation
-                                if len(resource_data) != entry['size']:
-                                    if len(resource_data) > entry['size']:
-                                        # Resource too large - fall back to original
-                                        issues.append(f"Model resource EXCEEDS original by {len(resource_data) - entry['size']} bytes")
-                                        issues.append("Using ORIGINAL resource to prevent deformation")
 
-                                        res_info = entry['name'] if res_actual_name == entry['name'] else f"{entry['name']} → {res_actual_name}"
-                                        print(f"    Resource ({res_info}): REJECTED - replacement too large!")
-                                        for issue in issues:
-                                            print(f"      ⚠ {issue}")
-
-                                        resource_data = original_data
-                                        issues = []
-                                        warnings = []
-                                        size_changed = False
-                                        res_already_printed = True
-                                        print(f"      → Using original resource, size {len(resource_data)}")
-                                    else:
-                                        # Pad to original size
-                                        resource_data = self.pad_model_to_block_size(resource_data, entry['size'])
-                                        warnings.append(f"Padded resource from {original_res_size} to {len(resource_data)} bytes")
-                                        size_changed = False
-
-                            # Print status (only if not already printed)
-                            if not res_already_printed:
-                                status = "replacement" if size_changed else "replacement (same size)"
-                                res_info = entry['name'] if res_actual_name == entry['name'] else f"{entry['name']} → {res_actual_name}"
-                                print(f"    Resource ({res_info}): Using {status}, size {len(resource_data)}, align {resource_alignment}")
-
-                                # Print issues and warnings
-                                for issue in issues:
-                                    print(f"      ⚠ CRITICAL: {issue}")
-                                for warning in warnings:
-                                    print(f"      ⓘ {warning}")
+                            status = "replacement" if size_changed else "replacement (same size)"
+                            res_info = entry['name'] if res_actual_name == entry['name'] else f"{entry['name']} → {res_actual_name}"
+                            print(f"    Resource ({res_info}): Using {status}, size {len(resource_data)}, align {resource_alignment}")
+                            for issue in issues:
+                                print(f"      ⚠ CRITICAL: {issue}")
+                            for warning in warnings:
+                                print(f"      ⓘ {warning}")
                         else:
                             resource_data = self.read_bytes(entry['offset'], entry['size'])
                             print(f"    Resource: Using original, size {len(resource_data)}, align {resource_alignment}")
@@ -1649,7 +1490,7 @@ class RebuildWindow:
             mode_frame = ttk.Frame(main_frame)
             mode_frame.pack(fill=tk.X, pady=(0, 8))
 
-            self._mode_desc_var = tk.StringVar(value="Individual - rebuild current bundle only")
+            self._mode_desc_var = tk.StringVar(value="Individual — rebuild current bundle only")
             self._mode_cb = ttk.Checkbutton(
                 mode_frame,
                 textvariable=self._mode_desc_var,
@@ -1793,7 +1634,7 @@ class RebuildWindow:
         """Switch UI between Individual and Bulk modes"""
         if self.bulk_mode.get():
             n = len(self.bulk_bundles) if self.bulk_bundles else 0
-            self._mode_desc_var.set(f"Bulk - rebuild all {n} bundle(s) in directory, injecting matching mod files into each")
+            self._mode_desc_var.set(f"Bulk — rebuild all {n} bundle(s) in directory, injecting matching mod files into each")
             self.output_file_frame.pack_forget()
             self.output_dir_frame.pack(fill=tk.X, pady=(0, 10), before=self.content_frame)
             file_types_ordered = [0, 6, 9, 13, 17, 20]
@@ -1808,7 +1649,7 @@ class RebuildWindow:
                                       sticky=tk.NSEW, pady=10)
             self.rebuild_btn.config(text="Bulk Rebuild")
         else:
-            self._mode_desc_var.set("Individual - rebuild current bundle only")
+            self._mode_desc_var.set("Individual — rebuild current bundle only")
             self.output_dir_frame.pack_forget()
             self.output_file_frame.pack(fill=tk.X, pady=(0, 10), before=self.content_frame)
             self.bulk_align_note.grid_remove()
@@ -2129,7 +1970,7 @@ class RebuildWindow:
             self.status_text.update()
 
             if not self._bundle_has_matches(bundle_path, mod_filenames):
-                self.status_text.insert(tk.END, f"  -> No matching mod files - skipped\n\n")
+                self.status_text.insert(tk.END, f"  -> No matching mod files — skipped\n\n")
                 skipped += 1
                 continue
 
@@ -2151,7 +1992,7 @@ class RebuildWindow:
                                 inner_bundle_name = os.path.basename(member)
                                 break
                         else:
-                            self.status_text.insert(tk.END, f"  -> No bundle inside ZIP - skipped\n\n")
+                            self.status_text.insert(tk.END, f"  -> No bundle inside ZIP — skipped\n\n")
                             skipped += 1
                             continue
 
@@ -2161,7 +2002,7 @@ class RebuildWindow:
                 tmp_entries = tmp_parser.parse()
 
                 if not tmp_entries or (len(tmp_entries) == 1 and 'error' in tmp_entries[0]):
-                    self.status_text.insert(tk.END, f"  -> Parse error - skipped\n\n")
+                    self.status_text.insert(tk.END, f"  -> Parse error — skipped\n\n")
                     skipped += 1
                     continue
 
@@ -2204,7 +2045,7 @@ class RebuildWindow:
             f"Failed:   {failed}"
         )
         self.status_text.insert(tk.END, f"=== Done ===\n{summary}\n")
-        self.output_text_callback(f"\nBulk rebuild complete - {rebuilt} rebuilt, {skipped} skipped, {failed} failed\n")
+        self.output_text_callback(f"\nBulk rebuild complete — {rebuilt} rebuilt, {skipped} skipped, {failed} failed\n")
         messagebox.showinfo("Bulk Rebuild Complete", summary)
 
     def build_from_directory(self, source_dir, output_path):
@@ -2657,7 +2498,7 @@ class PipeworksGUI:
 
         # Add warning for PS2 bundle files
         if filepath.lower().endswith(('.cmp', '.clp', '.bdp', '.bsf')):
-            self.output_text.insert(tk.END, "\n⚠ WARNING: If modding PS2, engine has a limit of 2,130KB. \n[STE and Unleashed PS2] \n")
+            self.output_text.insert(tk.END, "\n⚠ WARNING: PS2 has a Bundle limit of 2,130KB. \n")
         elif filepath.lower().endswith(('.clf',)):
             self.output_text.insert(tk.END, "\n[Xbox Bundle (.clf)]\n")
         elif filepath.lower().endswith(('.bdl',)):
