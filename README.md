@@ -2,6 +2,10 @@
 
 A GUI tool for parsing, extracting, and rebuilding Wii/GameCube/PS2 bundle files used in Pipeworks games.
 
+## 
+## Download the latest release here: [GZBuildr v1.2.2](https://github.com/Digitzaki/GZBuildr/releases/tag/Version_1.2.2?utm_source=chatgpt.com)
+
+
 ## Supported Formats
 
 - **.BDG** - GameCube/Wii bundle files (e.g., Unleashed Wii)
@@ -18,8 +22,8 @@ A GUI tool for parsing, extracting, and rebuilding Wii/GameCube/PS2 bundle files
 - **.VOL** - PS2 VOL format (extract only; files are organized into subfolders by extension)
 - **.ZIP** - ZIP archives containing any of the above formats
 
-## Requirements
-
+## Requirements (Source Installation)
+Download Executable Version (No Requirements): [GZBuildr v1.2.2](https://github.com/Digitzaki/GZBuildr/releases/tag/Version_1.2.2?utm_source=chatgpt.com)
 ### Python
 - Python 3.x
 - tkinter (usually included with Python)
@@ -111,21 +115,6 @@ After parsing, click the "Rebuild" button to modify and rebuild the bundle.
    - Files that are being replaced will be noted
    - Files not found in the replacement directory will use originals
 
-#### Important Notes for Rebuilding:
-
-- **Model/Mesh Files (Type 0, 17):**
-  - Cannot exceed original file size
-  - If replacement is larger, original will be used automatically
-  - If replacement is smaller, it will be padded to prevent deformation
-
-- **Texture Files (Type 9):**
-  - Size changes may indicate missing mipmaps
-  - Missing mipmaps can cause low-resolution rendering at distance
-
-- **File Size Limits:**
-  - **PS2 CMP files for Save The Earth**: Maximum 2,130KB
-  - Unleashed PS2 does NOT have this limit
-
 ## File Type Reference
 
 The tool organizes files by type ID:
@@ -168,10 +157,9 @@ The tool organizes files by type ID:
 - **Cause:** `tkinterdnd2` not installed
 - **Solution:** Run `pip install tkinterdnd2` or use the Browse button
 
-### File too large for Save The Earth (PS2)
+### File too large for PS2
 - **Cause:** CMP file exceeds 2,130KB limit
 - **Solution:** Remove or reduce size of some assets
-- Note: This is not a PS2 Hardware issue, as Unleashed PS2 exceeds said limit.
 
 ## Tips
 
