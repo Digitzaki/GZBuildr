@@ -848,6 +848,17 @@ def _parse_int_value(text: str) -> int:
     return int(text, 10)
 
 
+def _parse_string_edit_value(value_text: str) -> str:
+    value_text = value_text.strip()
+    try:
+        unquoted = ast.literal_eval(value_text)
+    except (SyntaxError, ValueError):
+        unquoted = value_text.strip("\"'")
+    if not isinstance(unquoted, str):
+        raise ValueError(f"String value must be text, got {type(unquoted).__name__}.")
+    return unquoted
+
+
 def _parse_typed_raw(
     module: PvmModule,
     type_name: str,
@@ -859,28 +870,45 @@ def _parse_typed_raw(
         value_text = re.split(r"\s*(?:#|;)", value_text.strip(), maxsplit=1)[0].strip()
         return struct.unpack(">I", struct.pack(">f", float(value_text)))[0]
     if type_name == "string":
-        value_text = value_text.strip()
-        try:
-            unquoted = ast.literal_eval(value_text)
-        except (SyntaxError, ValueError):
-            unquoted = value_text.strip("\"'")
-        if isinstance(unquoted, str):
-            pool = section_data(module, 6)
-            for offset, text in extract_null_strings(pool, 0):
-                if text == unquoted:
-                    return offset
-            if original_raw is not None and unquoted == original_value:
+        unquoted = _parse_string_edit_value(value_text)
+        pool = section_data(module, 6)
+        for offset, text in extract_null_strings(pool, 0):
+            if text == unquoted:
+                return offset
+        if original_raw is not None:
+            original_text = _cstr(pool, original_raw)
+            if unquoted == original_value:
                 return original_raw
+            if len(unquoted.encode("latin-1")) <= len(original_text.encode("latin-1")):
+                return original_raw
+            raise ValueError(
+                f"{unquoted!r} is not in this PVM string pool and is too long for "
+                f"the original {original_text!r} string slot."
+            )
         return _parse_int_value(value_text)
     value_text = re.split(r"\s*(?:#|;)", value_text.strip(), maxsplit=1)[0].strip()
     return _parse_int_value(value_text) & 0xFFFFFFFF
 
 
-def editable_to_pvm(text: str, original_data: bytes) -> bytes:
-    data = bytearray(original_data)
-    if not is_pwk_vm_module(data):
-        raise ValueError("Original data is not a PWK VM PVM.")
-    module = parse_pvm(bytes(data))
+def _append_pvm_string(data: bytearray, module: PvmModule, value: str) -> int:
+    encoded = value.encode("latin-1")
+    string_section = module.sections[6]
+    insert_at = string_section.end
+    string_offset = string_section.size
+    payload = encoded + b"\0"
+    data[insert_at:insert_at] = payload
+    delta = len(payload)
+    struct.pack_into(">I", data, 0x34, len(data))
+    for index, section in enumerate(module.sections):
+        entry = SECTION_TABLE_START + index * 8
+        if index == 6:
+            struct.pack_into(">I", data, entry + 4, section.size + delta)
+        elif index > 6:
+            struct.pack_into(">I", data, entry, section.offset + delta)
+    return string_offset
+
+
+def _editable_maps(module: PvmModule):
     typed_allowed = {
         (item.file_offset, item.type_name): item
         for item in extract_typed_values(module)
@@ -889,6 +917,15 @@ def editable_to_pvm(text: str, original_data: bytes) -> bytes:
         (item.file_offset, item.kind): item
         for item in extract_editable_values(module)
     }
+    return typed_allowed, allowed
+
+
+def editable_to_pvm(text: str, original_data: bytes) -> bytes:
+    data = bytearray(original_data)
+    if not is_pwk_vm_module(data):
+        raise ValueError("Original data is not a PWK VM PVM.")
+    module = parse_pvm(bytes(data))
+    typed_allowed, allowed = _editable_maps(module)
     old_row_re = re.compile(
         r"^@0x([0-9A-Fa-f]+)\s+.*?\bkind=(u8|u16|u24)\b.*?\bvalue=([+-]?(?:0x[0-9A-Fa-f]+|\d+))"
     )
@@ -898,23 +935,64 @@ def editable_to_pvm(text: str, original_data: bytes) -> bytes:
     table_row_re = re.compile(
         r"^@0x([0-9A-Fa-f]+)\s*\|\s*([A-Za-z0-9_]+)\s*\|\s*.+?\s*\|\s*(.+?)\s*$"
     )
-    patched = 0
+    editable_lines: list[re.Match[str]] = []
     for line in text.splitlines():
         stripped = line.strip()
         match = old_row_re.match(stripped) or new_row_re.match(stripped) or table_row_re.match(stripped)
-        if not match:
-            continue
-        file_offset = int(match.group(1), 16)
+        if match:
+            editable_lines.append(match)
+    editable_lines.sort(key=lambda item: int(item.group(1), 16))
+
+    patched = 0
+    string_insert_threshold = module.sections[6].end
+    inserted_string_bytes = 0
+    for match in editable_lines:
+        original_file_offset = int(match.group(1), 16)
+        file_offset = original_file_offset + (inserted_string_bytes if original_file_offset >= string_insert_threshold else 0)
         kind = match.group(2)
         typed_item = typed_allowed.get((file_offset, kind))
         if typed_item is not None:
-            raw_value = _parse_typed_raw(
-                module,
-                kind,
-                match.group(3),
-                original_value=typed_item.value,
-                original_raw=typed_item.raw_value,
-            )
+            if kind == "string":
+                string_patch_value = _parse_string_edit_value(match.group(3))
+                pool = section_data(module, 6)
+                existing_offset = next(
+                    (offset for offset, text_value in extract_null_strings(pool, 0) if text_value == string_patch_value),
+                    None,
+                )
+                if existing_offset is not None:
+                    raw_value = existing_offset
+                elif string_patch_value == typed_item.value:
+                    raw_value = typed_item.raw_value
+                else:
+                    old_bytes = str(typed_item.value).encode("latin-1")
+                    new_bytes = string_patch_value.encode("latin-1")
+                    if len(new_bytes) <= len(old_bytes):
+                        pool_start = module.sections[6].offset + typed_item.raw_value
+                        old_slot = old_bytes + b"\0"
+                        new_slot = new_bytes + (b"\0" * (len(old_bytes) - len(new_bytes) + 1))
+                        if data[pool_start:pool_start + len(old_slot)] != old_slot:
+                            raise ValueError(f"Original string bytes changed at 0x{pool_start:X}; refusing stale patch.")
+                        data[pool_start:pool_start + len(old_slot)] = new_slot
+                        module = parse_pvm(bytes(data))
+                        typed_allowed, allowed = _editable_maps(module)
+                        patched += 1
+                        continue
+                    before_len = len(data)
+                    raw_value = _append_pvm_string(data, module, string_patch_value)
+                    inserted_string_bytes += len(data) - before_len
+                    module = parse_pvm(bytes(data))
+                    typed_allowed, allowed = _editable_maps(module)
+                    typed_item = typed_allowed.get((file_offset, kind))
+                    if typed_item is None:
+                        raise ValueError(f"Could not refresh PVM string row at 0x{file_offset:X} after extending string pool.")
+            else:
+                raw_value = _parse_typed_raw(
+                    module,
+                    kind,
+                    match.group(3),
+                    original_value=typed_item.value,
+                    original_raw=typed_item.raw_value,
+                )
             new_raw = raw_value.to_bytes(4, "big")
             if data[file_offset:file_offset + 4] != typed_item.raw_value.to_bytes(4, "big") and raw_value != typed_item.raw_value:
                 raise ValueError(f"Original bytes changed at 0x{file_offset:X}; refusing stale patch.")
