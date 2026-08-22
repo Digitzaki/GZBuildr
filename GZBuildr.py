@@ -2706,6 +2706,20 @@ class PipeworksParser:
                     out[y * width + x] = data[src]
         return bytes(out)
 
+    def _ps2_swizzle8(self, indexes, width, height):
+        out = bytearray(width * height)
+        for y in range(height):
+            for x in range(width):
+                block = (y & ~0xF) * width + (x & ~0xF) * 2
+                swap = (((y + 2) >> 2) & 1) * 4
+                pos_y = (((y & ~3) >> 1) + (y & 1)) & 7
+                col = pos_y * width * 2 + ((x + swap) & 7) * 4
+                byte = ((y >> 1) & 1) + ((x >> 2) & 2)
+                dst = block + col + byte
+                if dst < len(out):
+                    out[dst] = indexes[y * width + x]
+        return bytes(out)
+
     def _ps2_palette_rgba(self, palette_data):
         raw = palette_data[:1024]
         if len(raw) < 1024:
@@ -2720,6 +2734,53 @@ class PipeworksParser:
                 + colors[index + 24:index + 32]
             )
         return [(r, g, b, min(255, a * 2)) for r, g, b, a in reordered]
+
+    def _ps2_palette_resource_from_rgba(self, palette):
+        colors = list(palette[:256])
+        while len(colors) < 256:
+            colors.append((0, 0, 0, 0))
+        raw_order = [(0, 0, 0, 0)] * 256
+        for base in range(0, 256, 32):
+            chunk = colors[base:base + 32]
+            raw_order[base:base + 8] = chunk[0:8]
+            raw_order[base + 8:base + 16] = chunk[16:24]
+            raw_order[base + 16:base + 24] = chunk[8:16]
+            raw_order[base + 24:base + 32] = chunk[24:32]
+        out = bytearray()
+        for r, g, b, a in raw_order:
+            stored_a = max(0, min(128, round(a / 2)))
+            out.extend(bytes((max(0, min(255, int(r))), max(0, min(255, int(g))), max(0, min(255, int(b))), stored_a)))
+        return bytes(out)
+
+    def _pending_ps2_palette_resource_for_entry(self, entry):
+        pending = getattr(self, '_pending_ps2_palette_replacements', {})
+        keys = {
+            entry.get('file_num'),
+            str(entry.get('name', '')).lower(),
+            os.path.basename(str(entry.get('name', ''))).lower(),
+        }
+        palette_data = None
+        for key in keys:
+            if key in pending:
+                palette_data = pending[key]
+                break
+        if palette_data is not None:
+            for key in keys:
+                pending.pop(key, None)
+        return palette_data
+
+    def _remember_ps2_palette_resource(self, palette_entry, palette_data):
+        if not palette_entry or not palette_data:
+            return
+        if not hasattr(self, '_pending_ps2_palette_replacements'):
+            self._pending_ps2_palette_replacements = {}
+        keys = {
+            palette_entry.get('file_num'),
+            str(palette_entry.get('name', '')).lower(),
+            os.path.basename(str(palette_entry.get('name', ''))).lower(),
+        }
+        for key in keys:
+            self._pending_ps2_palette_replacements[key] = palette_data
 
     def _find_ps2_palette_entry(self, texture_entry):
         try:
@@ -2798,6 +2859,85 @@ class PipeworksParser:
                     pix[x, y] = (r, g, b, a)
                     pos += 4
             return img
+        return None
+
+    def _encode_ps2_texture_image(self, image, info, texture_entry, original_resource_data):
+        width = info['width']
+        height = info['height']
+        fmt_name = info['format']
+        resample = getattr(Image, 'Resampling', Image).LANCZOS if hasattr(Image, 'LANCZOS') or hasattr(Image, 'Resampling') else 1
+        if fmt_name == 'PS2_PSMT8':
+            layout, used_size = self._texture_mip_layout(fmt_name, width, height, len(original_resource_data))
+            if not layout:
+                return None
+            base_image = image.convert('RGBA').resize((width, height), resample)
+            try:
+                palette_image = base_image.convert('P', palette=Image.Palette.ADAPTIVE, colors=256)
+            except AttributeError:
+                palette_image = base_image.convert('P', palette=Image.ADAPTIVE, colors=256)
+            raw_palette = palette_image.getpalette() or []
+            alpha_source = base_image.getchannel('A')
+            alpha_by_index = [255] * 256
+            base_indexes = list(palette_image.getdata())
+            base_alpha = list(alpha_source.getdata())
+            alpha_totals = [0] * 256
+            alpha_counts = [0] * 256
+            for idx, alpha in zip(base_indexes, base_alpha):
+                alpha_totals[idx] += alpha
+                alpha_counts[idx] += 1
+            palette = []
+            for index in range(256):
+                r = raw_palette[index * 3] if index * 3 < len(raw_palette) else 0
+                g = raw_palette[index * 3 + 1] if index * 3 + 1 < len(raw_palette) else 0
+                b = raw_palette[index * 3 + 2] if index * 3 + 2 < len(raw_palette) else 0
+                if alpha_counts[index]:
+                    alpha_by_index[index] = round(alpha_totals[index] / alpha_counts[index])
+                palette.append((r, g, b, alpha_by_index[index]))
+            palette_resource = self._ps2_palette_resource_from_rgba(palette)
+            palette_entry = self._find_ps2_palette_entry(texture_entry)
+            if not palette_entry:
+                print(f"      WARNING CRITICAL: PS2 indexed texture has no palette resource for {texture_entry.get('name')}")
+                return None
+            self._remember_ps2_palette_resource(palette_entry, palette_resource)
+
+            new_data = bytearray()
+            for mip_width, mip_height, _offset, _size in layout:
+                mip = image.convert('RGBA').resize((mip_width, mip_height), resample)
+                if mip_width == width and mip_height == height:
+                    indexed = palette_image
+                else:
+                    indexed = mip.convert('RGB').quantize(
+                        palette=palette_image,
+                        dither=Image.Dither.NONE if hasattr(Image, 'Dither') else 0,
+                    )
+                indexes = bytes(indexed.getdata())
+                new_data.extend(self._ps2_swizzle8(indexes, mip_width, mip_height))
+            if used_size < len(original_resource_data):
+                new_data.extend(original_resource_data[used_size:])
+            return bytes(new_data)
+        if fmt_name == 'PS2_BGR555':
+            out = bytearray()
+            layout, used_size = self._texture_mip_layout(fmt_name, width, height, len(original_resource_data))
+            if not layout:
+                return None
+            for mip_width, mip_height, _offset, _size in layout:
+                img = image.convert('RGBA').resize((mip_width, mip_height), resample)
+                for r, g, b, _a in img.getdata():
+                    value = (
+                        (max(0, min(31, round(r * 31 / 255))))
+                        | (max(0, min(31, round(g * 31 / 255))) << 5)
+                        | (max(0, min(31, round(b * 31 / 255))) << 10)
+                    )
+                    out.extend(struct.pack('<H', value))
+            if used_size < len(original_resource_data):
+                out.extend(original_resource_data[used_size:])
+            return bytes(out)
+        if fmt_name == 'PS2_RGBA32':
+            img = image.convert('RGBA').resize((width, height), resample)
+            out = bytearray()
+            for r, g, b, a in img.getdata():
+                out.extend(bytes((r, g, b, max(0, min(128, round(a / 2))))))
+            return bytes(out)
         return None
 
     def _encode_texture_image(self, image, fmt_name, width, height):
@@ -3023,17 +3163,27 @@ class PipeworksParser:
         if not info:
             print(f"      WARNING CRITICAL: Could not read texture metadata for {resource_entry.get('name')}")
             return None
+        source_image = Image.open(png_path).convert('RGBA')
         if info.get('platform') == 'ps2':
+            encoded = self._encode_ps2_texture_image(source_image, info, main_entry, original_resource_data)
+            if encoded is None:
+                print(f"      WARNING CRITICAL: Could not encode PS2 {info['format']} texture for {resource_entry.get('name')}")
+                return None
+            if len(encoded) != len(original_resource_data):
+                print(
+                    f"      WARNING CRITICAL: Encoded PS2 texture size changed "
+                    f"({len(encoded)} vs original {len(original_resource_data)})"
+                )
+                return None
             print(
-                f"      WARNING CRITICAL: PNG rebuild is not enabled for PS2 {info['format']} textures yet; "
-                "use the raw .resource replacement for this file."
+                f"      PNG texture encoded: {os.path.basename(png_path)} -> "
+                f"{info['format']} {info['width']}x{info['height']}"
             )
-            return None
+            return encoded
         layout, used_size = self._texture_mip_layout(info['format'], info['width'], info['height'], len(original_resource_data))
         if not layout:
             print(f"      WARNING CRITICAL: Could not infer mip layout for {resource_entry.get('name')}")
             return None
-        source_image = Image.open(png_path).convert('RGBA')
         new_data = bytearray()
         for width, height, _offset, _size in layout:
             new_data.extend(self._encode_texture_image(source_image, info['format'], width, height))
@@ -3247,6 +3397,7 @@ class PipeworksParser:
                         break
 
                 original_data = self.read_bytes(entry['offset'], entry['size'])
+                pending_palette_data = self._pending_ps2_palette_resource_for_entry(entry) if entry.get('file_type') == 13 else None
                 png_path, png_actual_name = (None, None)
                 if entry.get('file_type') == 9 and file_info.get('main'):
                     png_path, png_actual_name = self._find_texture_png_replacement(
@@ -3256,7 +3407,11 @@ class PipeworksParser:
                     )
                 use_png = self._texture_png_should_override_resource(png_path, replacement_path)
 
-                if use_png:
+                if pending_palette_data is not None:
+                    resource_data = pending_palette_data
+                    res_info = entry['name']
+                    print(f"    Resource ({res_info}): generated PS2 palette replacement, size {len(resource_data)}")
+                elif use_png:
                     encoded_data = self._build_texture_resource_from_png(
                         png_path,
                         file_info['main'],
@@ -3324,6 +3479,7 @@ class PipeworksParser:
 
             # Store custom alignments for use in get_alignment_for_type
             self.custom_alignments = custom_alignments if custom_alignments else {}
+            self._pending_ps2_palette_replacements = {}
 
             # Create a mutable copy of file_data
             new_data = bytearray(self.file_data)
@@ -3775,6 +3931,7 @@ class PipeworksParser:
                                 break
 
                         original_data = self.read_bytes(entry['offset'], entry['size'])
+                        pending_palette_data = self._pending_ps2_palette_resource_for_entry(entry) if entry.get('file_type') == 13 else None
                         png_path, png_actual_name = (None, None)
                         if entry.get('file_type') == 9 and file_info.get('main'):
                             png_path, png_actual_name = self._find_texture_png_replacement(
@@ -3784,7 +3941,14 @@ class PipeworksParser:
                             )
                         use_png = self._texture_png_should_override_resource(png_path, replacement_path)
 
-                        if use_png:
+                        if pending_palette_data is not None:
+                            resource_data = pending_palette_data
+                            size_changed = len(resource_data) != entry['size']
+                            status = "generated PS2 palette replacement"
+                            if not size_changed:
+                                status += " (same size)"
+                            print(f"    Resource ({entry['name']}): Using {status}, size {len(resource_data)}, align {resource_alignment}")
+                        elif use_png:
                             encoded_data = self._build_texture_resource_from_png(
                                 png_path,
                                 file_info['main'],
@@ -10404,7 +10568,7 @@ class PipeworksGUI:
             def succeed(result=result):
                 finish_log()
                 set_action(
-                    "Build ISO",
+                    "ISO",
                     lambda: self._start_iso_build_in_log(source_dir, log, start_log, finish_log, set_action)
                 )
                 messagebox.showinfo(
