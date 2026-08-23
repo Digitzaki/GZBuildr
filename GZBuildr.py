@@ -10452,6 +10452,17 @@ class PipeworksGUI:
         return window, append, start, finish, set_action
 
     def _start_iso_build_in_log(self, source_dir, log, start_log, finish_log, set_action=None):
+        if not source_dir:
+            initial_input = self.last_extract_dir or self.current_bundle_dir or os.path.expanduser("~")
+            source_dir = _dialog(
+                self.root,
+                filedialog.askdirectory,
+                title="Select Folder to Pack into ISO",
+                initialdir=initial_input,
+            )
+            if not source_dir:
+                return
+
         base_name = os.path.basename(os.path.normpath(source_dir)) or "new_image"
         output_path = _dialog(
             self.root,
@@ -10477,7 +10488,7 @@ class PipeworksGUI:
         if set_action:
             set_action()
         start_log()
-        log("\n=== Build ISO From Same Source ===\n")
+        log("\n=== Build ISO ===\n")
         log(f"Building ISO from folder:\n  {source_dir}\n")
         log("Data Type: MODE1/2048\n")
         log("File System: ISO9660 + UDF VRS\n")
@@ -10569,7 +10580,7 @@ class PipeworksGUI:
                 finish_log()
                 set_action(
                     "ISO",
-                    lambda: self._start_iso_build_in_log(source_dir, log, start_log, finish_log, set_action)
+                    lambda: self._start_iso_build_in_log(None, log, start_log, finish_log, set_action)
                 )
                 messagebox.showinfo(
                     "Success",
