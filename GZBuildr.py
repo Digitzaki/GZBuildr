@@ -318,6 +318,30 @@ def _load_monster_data_tool():
     return None
 
 
+def _load_cmg_data_tool():
+    candidates = [
+        Path(sys.executable).resolve().parent / "Data Tools" / "cmg_data_txt_tool.py",
+        Path(__file__).resolve().parent / "Data Tools" / "cmg_data_txt_tool.py",
+        Path(resource_path(os.path.join("Data Tools", "cmg_data_txt_tool.py"))),
+        Path(resource_path("cmg_data_txt_tool.py")),
+    ]
+    for candidate in candidates:
+        if not candidate.exists():
+            continue
+        try:
+            spec = importlib.util.spec_from_file_location("gzbuildr_cmg_data_txt_tool", candidate)
+            if spec is None or spec.loader is None:
+                continue
+            module = importlib.util.module_from_spec(spec)
+            sys.modules[spec.name] = module
+            spec.loader.exec_module(module)
+            return module
+        except Exception as exc:
+            _record_tool_load_error("cmg_data", candidate, exc)
+            continue
+    return None
+
+
 def _load_skeleton_type3_tool():
     candidates = [
         Path(sys.executable).resolve().parent / "Data Tools" / "skeleton_type3_txt_tool.py",
@@ -728,6 +752,8 @@ CHARACTER_DATA_TOOL = _load_character_data_tool()
 HAS_CHARACTER_DATA_TOOL = CHARACTER_DATA_TOOL is not None
 MONSTER_DATA_TOOL = _load_monster_data_tool()
 HAS_MONSTER_DATA_TOOL = MONSTER_DATA_TOOL is not None
+CMG_DATA_TOOL = _load_cmg_data_tool()
+HAS_CMG_DATA_TOOL = CMG_DATA_TOOL is not None
 SKELETON_TYPE3_TOOL = _load_skeleton_type3_tool()
 HAS_SKELETON_TYPE3_TOOL = SKELETON_TYPE3_TOOL is not None
 LEVEL_DATA_TOOL = _load_level_data_tool()
@@ -762,6 +788,7 @@ SUPPORTED_BUNDLE_EXTENSIONS = (
 EDITABLE_ENTRY_EXTENSIONS = ('.bsf', '.txt', '.ifc', '.xfg', '.prx', '.edf', '.pvm')
 CHARACTER_DATA_ENTRY_NAME = "2/character_data"
 MONSTER_DATA_ENTRY_NAME = "2/000monster_data"
+CMG_MONSTER_DATA_RE = re.compile(r"^2/monster_data\d*$")
 
 
 class PipeworksParser:
@@ -2491,6 +2518,8 @@ class PipeworksParser:
             8: 'CMPR',
         }
         hinted = gx_map.get(fmt_code) or format_hints.get(fmt_code)
+        if fmt_code == 1 and resource_size >= width * height * 2:
+            hinted = 'RGB5A3'
         candidates = ['CMPR', 'I4', 'I8', 'IA4', 'IA8', 'RGB565', 'RGB5A3', 'RGBA8']
         tolerance = max(128, int(max(1, resource_size) * 0.002))
         scored = []
@@ -2801,6 +2830,12 @@ class PipeworksParser:
                 return entry
         return None
 
+    def _ps2_indexed_texture_uses_swizzle(self, texture_entry):
+        ext = os.path.splitext(self.filepath.lower())[1]
+        if ext in ('.bdp', '.bsf'):
+            return False
+        return True
+
     def _decode_ps2_texture_image(self, resource_data, info, texture_entry):
         if not HAS_PIL:
             return None
@@ -2816,7 +2851,11 @@ class PipeworksParser:
                 palette = [(i, i, i, 255) for i in range(256)]
             if not palette:
                 return None
-            indexes = self._ps2_unswizzle8(resource_data[:width * height], width, height)
+            raw_indexes = resource_data[:width * height]
+            if self._ps2_indexed_texture_uses_swizzle(texture_entry):
+                indexes = self._ps2_unswizzle8(raw_indexes, width, height)
+            else:
+                indexes = raw_indexes
             img = Image.new('RGBA', (width, height))
             pix = img.load()
             for y in range(height):
@@ -2911,7 +2950,10 @@ class PipeworksParser:
                         dither=Image.Dither.NONE if hasattr(Image, 'Dither') else 0,
                     )
                 indexes = bytes(indexed.getdata())
-                new_data.extend(self._ps2_swizzle8(indexes, mip_width, mip_height))
+                if self._ps2_indexed_texture_uses_swizzle(texture_entry):
+                    new_data.extend(self._ps2_swizzle8(indexes, mip_width, mip_height))
+                else:
+                    new_data.extend(indexes)
             if used_size < len(original_resource_data):
                 new_data.extend(original_resource_data[used_size:])
             return bytes(new_data)
@@ -8496,7 +8538,7 @@ class PipeworksGUI:
         if entry.get('is_resource'):
             return False
         name = str(entry.get('name', '')).replace('\\', '/').lower()
-        return name in {CHARACTER_DATA_ENTRY_NAME, MONSTER_DATA_ENTRY_NAME}
+        return name in {CHARACTER_DATA_ENTRY_NAME, MONSTER_DATA_ENTRY_NAME} or CMG_MONSTER_DATA_RE.match(name) is not None
 
     def _is_level_data_entry(self, entry):
         if entry.get('is_resource'):
@@ -8517,6 +8559,8 @@ class PipeworksGUI:
             return CHARACTER_DATA_TOOL
         if name == MONSTER_DATA_ENTRY_NAME and HAS_MONSTER_DATA_TOOL:
             return MONSTER_DATA_TOOL
+        if CMG_MONSTER_DATA_RE.match(name) is not None and HAS_CMG_DATA_TOOL:
+            return CMG_DATA_TOOL
         if self._is_level_data_entry(entry) and HAS_LEVEL_DATA_TOOL:
             return LEVEL_DATA_TOOL
         return None
@@ -8525,6 +8569,8 @@ class PipeworksGUI:
         name = str(entry.get('name', '')).replace('\\', '/').lower()
         if name == MONSTER_DATA_ENTRY_NAME:
             return "000MONSTER_DATA"
+        if CMG_MONSTER_DATA_RE.match(name) is not None:
+            return Path(str(entry.get("name", "MONSTER_DATA")).replace("\\", "/")).name or "MONSTER_DATA"
         if self._is_level_data_entry(entry):
             return Path(str(entry.get("name", "LevelData")).replace("\\", "/")).name or "LevelData"
         return "Character_Data"
@@ -8995,7 +9041,12 @@ class PipeworksGUI:
         data_tool = self._character_data_tool_for_entry(entry)
         data_label = self._character_data_label_for_entry(entry)
         if data_tool is None:
-            tool_key = "monster_data" if data_label == "000MONSTER_DATA" else "character_data"
+            if data_label == "000MONSTER_DATA":
+                tool_key = "monster_data"
+            elif str(data_label).lower().startswith("monster_data"):
+                tool_key = "cmg_data"
+            else:
+                tool_key = "character_data"
             details = "\n".join(TOOL_LOAD_ERRORS.get(tool_key, []))
             message = f"{data_label} decoder is missing."
             if details:
