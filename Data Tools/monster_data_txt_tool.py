@@ -176,6 +176,10 @@ def u32(data: bytes | bytearray, offset: int) -> int:
     return struct.unpack_from("<I", data, offset)[0]
 
 
+def u16(data: bytes | bytearray, offset: int) -> int:
+    return struct.unpack_from("<H", data, offset)[0]
+
+
 def put_u32(data: bytearray, offset: int, value: int) -> None:
     struct.pack_into("<I", data, offset, value & 0xFFFFFFFF)
 
@@ -1034,6 +1038,8 @@ def build_ref_name_lookup_from_text(text: str) -> dict[str, int]:
             label = match.group(3).strip()
             for name in (label, display_name(label)):
                 lookup.setdefault(ref_lookup_key(name), rel)
+            if "." in label:
+                lookup.setdefault(ref_lookup_key(label.rsplit(".", 1)[-1]), rel)
             continue
         toc_match = re.match(r"^@0x([0-9A-Fa-f]+)\s+(.+?)\s*$", stripped)
         if toc_match:
@@ -1258,27 +1264,27 @@ PS2_FIXED_ASCII_FIELDS = [
 PS2_CORE_TUNING_RELS = tuple(range(0x1AC, 0x290, 4))
 
 PS2_CORE_TUNING_FIELD_NAMES = {
-    0x01AC: "Movement.MaxWalkSpeed",
-    0x01B0: "Movement.MaxRunSpeed",
-    0x01B4: "Movement.MaxChargeSpeed",
-    0x01B8: "Movement.TurnAcceleration",
-    0x01C8: "Scale.BodyX",
-    0x01CC: "Scale.BodyY",
-    0x01D0: "Scale.BodyZ",
-    0x01D4: "Scale.Head",
-    0x01D8: "Scale.Arms",
-    0x01DC: "Scale.Legs",
-    0x01E0: "Scale.Tail",
-    0x01E4: "Scale.Weapon",
-    0x01E8: "Scale.Effect",
-    0x01EC: "Scale.Camera",
-    0x01F0: "Scale.Grab",
-    0x01F4: "Scale.Throw",
-    0x0208: "Combat.LightHitReactionScale",
-    0x020C: "Combat.HeavyHitReactionScale",
-    0x0210: "Combat.MaxHitPoints",
-    0x0214: "Combat.StartingHitPoints",
-    0x022C: "Combat.EnergyRegenRate",
+    0x01AC: "Combat.CalcReactionLevelThresholdA",
+    0x01B0: "Combat.CalcReactionLevelThresholdB",
+    0x01B4: "Combat.CalcReactionLevelThresholdC",
+    0x01B8: "Stats.Health",
+    0x01C8: "DamageResponse.Concussion",
+    0x01CC: "DamageResponse.UnknownAlwaysOneA",
+    0x01D0: "DamageResponse.Explosive",
+    0x01D4: "DamageResponse.Edged",
+    0x01D8: "DamageResponse.Blunt",
+    0x01DC: "DamageResponse.Poison",
+    0x01E0: "DamageResponse.Electrical",
+    0x01E4: "DamageResponse.AlienEnergy",
+    0x01E8: "DamageResponse.Radiation",
+    0x01EC: "DamageResponse.Ice",
+    0x01F0: "DamageResponse.Fire",
+    0x01F4: "DamageResponse.UnknownAlwaysOneB",
+    0x0208: "DamageResponse.VehicleTankCandidate",
+    0x020C: "DamageResponse.VehicleUfoCandidate",
+    0x0210: "Combat.SpecialHitPointsA",
+    0x0214: "Combat.SpecialHitPointsB",
+    0x022C: "DamageResponse.VehicleHelicopterCandidate",
     0x0230: "Combat.EnergyCostScale",
     0x0234: "Combat.RageGainScale",
     0x0238: "Targeting.CloseRange",
@@ -1350,21 +1356,26 @@ PS2_ACTION_RECORD_FIELD_NAMES = {
     0x1C: "HitDirectionZ",
     0x20: "FacingDirectionX",
     0x24: "FacingDirectionZ",
-    0x28: "HitEventFlags",
+    0x28: "MoveEventCountFirstIndex",
     0x2C: "HitBehaviorFlags",
-    0x30: "PrimaryDataRef",
+    0x30: "CueNames",
     0x34: "ActionIndex",
+    0x38: "MoveCategory",
+    0x3C: "AIScoreEdgeId",
     0x40: "StartFrame",
     0x44: "ActiveFrame",
     0x48: "RecoveryFrame",
     0x4C: "CancelWindow",
-    0x50: "Priority",
+    0x50: "Damage",
     0x54: "RootMotionX",
     0x58: "RootMotionZ",
     0x5C: "RootMotionY",
-    0x60: "InputWindowFlags",
-    0x64: "InputWindowStart",
-    0x68: "InputWindowEnd",
+    0x60: "ReactionDamageFlags",
+    0x64: "CounterAttackParam",
+    0x68: "CounterAttackCompare",
+    0x6C: "IgnoreAttackHeight",
+    0x70: "AdjustReactionParam",
+    0x80: "AIScoreWeight",
 }
 
 PS2_ACTION_RECORD_FIELD_TYPES = {
@@ -1382,6 +1393,8 @@ PS2_ACTION_RECORD_FIELD_TYPES = {
     0x2C: "u8x4",
     0x30: "ref",
     0x34: "int",
+    0x38: "int",
+    0x3C: "int",
     0x40: "f32",
     0x44: "f32",
     0x48: "f32",
@@ -1392,8 +1405,124 @@ PS2_ACTION_RECORD_FIELD_TYPES = {
     0x5C: "f32",
     0x60: "u8x4",
     0x64: "int",
-    0x68: "ref",
+    0x68: "int",
+    0x6C: "int",
+    0x70: "int",
+    0x80: "f32",
 }
+
+PS2_MOVE_EVENT_TYPE_NAMES = {
+    0: "AttackProperty",
+    2: "FootStep",
+    5: "SetInvulnerableFlag",
+    6: "StopSound",
+    10: "HeldDamageWindow",
+    11: "CamShake",
+    12: "StoreEventRef",
+    13: "PlayEventSound",
+    14: "SimpleAttachedFx",
+    15: "Swoosh",
+    16: "SetSwooshNode",
+    17: "SwooshStop",
+    18: "BurrowFx",
+    21: "AdjustMoveTimer",
+    23: "ClearHeldTimer",
+    24: "StoreHeldEvent",
+    27: "ApplyFloatToMonster",
+    28: "HeldMonsterDamageEvent",
+    29: "StoreEventPointerA",
+    30: "StoreEventPointerB",
+    31: "BodyContactEvent",
+    32: "StoreEventPointerC",
+    33: "StoreEventPointerD",
+    35: "StoreEventPointerE",
+    36: "StoreEventPointerF",
+}
+
+PS2_ATTACK_PROPERTY_EVENT_FIELD_NAMES = {
+    0x04: "EventTime",
+    0x08: "EventFlags",
+    0x10: "Profile",
+    0x14: "HitProfile",
+    0x18: "ScopeFlags",
+    0x1C: "ExtraMode",
+    0x20: "KnockbackMode",
+    0x24: "ReactionMode",
+    0x28: "DamageType",
+    0x2C: "Damage",
+    0x30: "LaunchHeight",
+    0x34: "LaunchGravity",
+    0x38: "ThrowAngle",
+    0x3C: "ExtraFloat",
+    0x40: "Scale",
+}
+
+PS2_ATTACK_PROPERTY_EVENT_FIELD_TYPES = {
+    0x04: "f32",
+    0x08: "u16x2",
+    0x10: "int",
+    0x14: "int",
+    0x18: "int",
+    0x1C: "int",
+    0x20: "int",
+    0x24: "int",
+    0x28: "int",
+    0x2C: "f32",
+    0x30: "f32",
+    0x34: "f32",
+    0x38: "f32",
+    0x3C: "f32",
+    0x40: "f32",
+}
+
+
+def ps2_move_event_type_name(event_type: int) -> str:
+    return PS2_MOVE_EVENT_TYPE_NAMES.get(event_type, f"Type{event_type:02d}")
+
+
+def ps2_move_event_field_name(event_type: int, field_rel: int, kind: str, string_value: str | None = None) -> str:
+    if field_rel == 0x00:
+        return "Type"
+    if event_type == 0:
+        return PS2_ATTACK_PROPERTY_EVENT_FIELD_NAMES.get(field_rel, f"Payload0x{field_rel:02X}")
+    # Every named DEvent case branches from DMonsterBase::onMoveEvent. These names are
+    # intentionally class/usage based; bit-level payload meanings stay packed until proven.
+    if event_type in {2, 11, 14, 15}:
+        class_fields = {
+            2: {0x04: "EventTime", 0x08: "FootstepCue", 0x0C: "FootstepParam"},
+            11: {0x04: "EventTime", 0x08: "ShakeType", 0x0C: "ShakeScale"},
+            14: {0x04: "EventTime", 0x08: "Resource", 0x0C: "AttachNode", 0x10: "Flags"},
+            15: {0x04: "EventTime", 0x08: "Resource", 0x0C: "StartBonePair", 0x10: "EndBonePair", 0x14: "Flags", 0x18: "Scale"},
+        }[event_type]
+        return class_fields.get(field_rel, f"Payload0x{field_rel:02X}")
+    if event_type in {6, 12, 13, 16, 17, 18, 21, 23, 24, 27, 28, 29, 30, 31, 32, 33, 35, 36}:
+        if field_rel == 0x04 and kind == "f32":
+            return "EventTime"
+        if string_value:
+            if is_ps2_skeleton_node_name(string_value):
+                return "Node"
+            if string_value.lower().endswith(".edf"):
+                return "Resource"
+            return "Name"
+        explicit = {
+            0x04: "Param04",
+            0x08: "Param08",
+            0x0C: "Param0C",
+            0x10: "Param10",
+            0x14: "Param14",
+            0x18: "Param18",
+            0x1C: "Param1C",
+        }
+        return explicit.get(field_rel, f"Payload0x{field_rel:02X}")
+    if field_rel == 0x04 and kind == "f32":
+        return "EventTime"
+    if string_value:
+        if is_ps2_skeleton_node_name(string_value):
+            return "Node"
+        if string_value.lower().endswith(".edf"):
+            return "Resource"
+        return "Name"
+    return f"Payload0x{field_rel:02X}"
 
 
 PS2_INPUT_CODE_NAMES = {
@@ -1419,22 +1548,10 @@ PS2_INPUT_CODE_NAMES = {
 
 
 def ps2_action_record_string_field(value: str, field_rel: int) -> str:
-    if field_rel == 0x38:
-        return "ActionFamily"
-    if field_rel == 0x3C:
-        return "ContactNode" if is_ps2_skeleton_node_name(value) else "Cue"
     if field_rel == 0x78:
         return "Animation"
     if field_rel == 0x7C:
-        return "LinkedAction"
-    if field_rel == 0x6C:
-        return "LinkedActionA"
-    if field_rel == 0x70:
-        return "LinkedActionB"
-    if field_rel == 0x74:
-        return "LinkedActionC"
-    if field_rel == 0x80:
-        return "LinkedActionD"
+        return "MoveName"
     return "String"
 
 
@@ -1454,12 +1571,12 @@ def ps2_primary_action_record_starts(data: bytes | bytearray, base: int, size: i
 
 
 def ps2_action_record_display_name(data: bytes | bytearray, strings: list[str], base: int, rel: int) -> str:
-    for field_rel in (0x78, 0x7C, 0x38, 0x3C):
+    for field_rel in (0x7C, 0x78):
         raw = u32(data, base + rel + field_rel)
         string_index = string_id_at(data, strings, base + rel + field_rel)
         if raw != 0 and string_index is not None and is_meaningful_string(strings[string_index]):
             return meaningful_stem(strings[string_index])
-    return f"Action0x{rel:06X}"
+    return f"DMonsterMove0x{rel:06X}"
 
 
 def ps2_action_input_labels(
@@ -1642,11 +1759,12 @@ PS2_STRUCTURAL_FIELDS: dict[int, tuple[str, str]] = {
     0x0B44: ("ref", "TableRefs.PrimaryData"),
     0x0B48: ("int", "TableCounts.PrimaryData"),
     0x0B4C: ("ref", "TableRefs.PrimaryLookup"),
-    0x0B50: ("ref", "TableRefs.EffectLookup"),
+    0x0B50: ("ref", "TableRefs.ActionTree"),
+    0x0B54: ("int", "TableCounts.BodyPartActionLookup"),
     0x0B58: ("ref", "TableRefs.BodyPartActionLookup"),
-    0x0B5C: ("int", "TableCounts.BodyPartActionLookup"),
-    0x0B60: ("ref", "TableRefs.IndexedActionBase"),
-    0x0B64: ("ref", "TableRefs.IAOffsets"),
+    0x0B5C: ("int", "TableCounts.MoveEvents"),
+    0x0B60: ("ref", "TableRefs.MoveEvents"),
+    0x0B64: ("ref", "TableRefs.MoveEventOffsets"),
     0x0B6C: ("ref", "TableRefs.BodyPartRecords"),
     0x0B70: ("ref", "TableRefs.BodyPartDirectory"),
     0x0B78: ("ref", "TableRefs.BeamFightActions"),
@@ -1680,6 +1798,12 @@ def strip_label_parenthetical_suffix(value: str) -> str:
 def meaningful_stem(value: str) -> str:
     stem = clean_label(strip_label_parenthetical_suffix(strip_ps2_prefix(value))).strip("_")
     return stem or clean_label(value)
+
+
+def meaningful_resource_stem(value: str) -> str:
+    stem = strip_ps2_prefix(value)
+    stem = re.sub(r"\.(?:edf|prx|pvm|pwk|bsf|txt|xfg|ifc)$", "", stem, flags=re.IGNORECASE)
+    return meaningful_stem(stem)
 
 
 def is_ps2_skeleton_node_name(value: str) -> bool:
@@ -2051,7 +2175,7 @@ def ps2_effect_record_stem(
     strings: list[str],
     base: int,
     record_start: int,
-    _used_effect_stems: dict[str, int],
+    used_effect_stems: dict[str, int],
 ) -> str:
     def string_at(field_rel: int) -> str:
         if u32(data, base + record_start + field_rel) == 0:
@@ -2079,8 +2203,29 @@ def ps2_effect_record_stem(
         "",
     )
     resource = next((string_at(field_rel) for field_rel in range(0, 0x68, 4) if ".edf" in string_at(field_rel).lower()), "")
-    stem_parts = [meaningful_stem(part) for part in (owner, event or resource) if part]
-    return "EffectTable." + ".".join(stem_parts or ["Record"])
+    owner_plain = strip_ps2_prefix(owner).lower()
+    generic_owner = (
+        not owner
+        or "airborne" in owner_plain
+        or owner_plain.startswith("arm - ")
+        or owner_plain.startswith("bip")
+        or owner_plain in {"body", "head", "neck", "tail"}
+    )
+    primary = event or resource or owner
+    if resource and (not event or strip_ps2_prefix(event).lower().endswith(".edf")):
+        primary = resource
+
+    stem_parts: list[str] = []
+    if primary:
+        stem_parts.append(meaningful_resource_stem(primary))
+    if owner and not generic_owner and owner != primary:
+        owner_stem = meaningful_resource_stem(owner)
+        if owner_stem not in stem_parts:
+            stem_parts.insert(0, owner_stem)
+    stem_base = "EffectTable." + ".".join(stem_parts or ["Record"])
+    duplicate = used_effect_stems.get(stem_base, 0)
+    used_effect_stems[stem_base] = duplicate + 1
+    return stem_base if duplicate == 0 else f"{stem_base}.Variant{duplicate + 1:02d}"
 
 
 def ps2_beam_string_field(value: str, field_rel: int, used: set[str]) -> str:
@@ -2373,30 +2518,25 @@ def ps2_structural_table_labels(
         and indexed_offsets - primary_lookup == primary_count * action_record_size
     ):
         string_slots = {
-            0x38: "ActionFamily",
-            0x3C: "Cue",
-            0x6C: "LinkedActionA",
-            0x70: "LinkedActionB",
-            0x74: "LinkedActionC",
             0x78: "Animation",
-            0x7C: "LinkedAction",
-            0x80: "LinkedActionD",
+            0x7C: "MoveName",
         }
         seen_stems: dict[str, int] = {}
         for index in range(primary_count):
             rel = primary_lookup + index * action_record_size
             stem_source = None
-            for slot in (0x78, 0x7C, 0x38, 0x3C):
+            for slot in (0x7C, 0x78):
                 string_index = string_id_at(data, strings, base + rel + slot)
                 if string_index is not None and is_meaningful_string(strings[string_index]):
                     stem_source = strings[string_index]
                     break
             if stem_source:
-                stem_base = f"ActionRecord.{meaningful_stem(stem_source)}"
+                stem_base = f"DMonsterMove.{meaningful_stem(stem_source)}"
             else:
-                stem_base = f"ActionRecord.Index{index:03d}"
-            seen_stems[stem_base] = seen_stems.get(stem_base, 0) + 1
-            stem = stem_base
+                stem_base = f"DMonsterMove.Index{index:03d}"
+            duplicate = seen_stems.get(stem_base, 0)
+            seen_stems[stem_base] = duplicate + 1
+            stem = stem_base if duplicate == 0 else f"{stem_base}.Variant{duplicate + 1:02d}"
             roots.setdefault(rel, stem)
             for field_rel in range(0, action_record_size, 4):
                 field_abs = base + rel + field_rel
@@ -2426,68 +2566,79 @@ def ps2_structural_table_labels(
                 labels[rel + field_rel] = f"{stem}.{field_name}"
                 forced_types[rel + field_rel] = forced_kind
 
-    indexed_base = u32(data, base + 0x0B60) if 0x0B64 <= size else 0
+    move_event_base = u32(data, base + 0x0B60) if 0x0B64 <= size else 0
+    move_event_offsets = u32(data, base + 0x0B64) if 0x0B68 <= size else 0
+    move_event_count = u32(data, base + 0x0B5C) if 0x0B60 <= size else 0
     if (
-        indexed_offsets % 4 == 0
-        and indexed_base % 4 == 0
-        and 0 < indexed_offsets < indexed_base <= size
+        move_event_offsets % 2 == 0
+        and move_event_base % 4 == 0
+        and 0 < move_event_offsets < move_event_base <= size
+        and 0 < move_event_count < 0x10000
+        and move_event_offsets + (move_event_count + 1) * 2 <= move_event_base
     ):
-        roots.setdefault(indexed_offsets, "IAOffsets")
-        indexed_base_end = u32(data, base + 0x0B6C) if 0x0B70 <= size else size
-        indexed_base_size = indexed_base_end - indexed_base if indexed_base < indexed_base_end <= size else 0
-        indexed_offset_count = (indexed_base - indexed_offsets) // 4
-        ia_index_action_names: dict[int, str] = {}
+        roots.setdefault(move_event_offsets, "MoveEventOffsets")
+        roots.setdefault(move_event_base, "MoveEvents")
+        move_event_table_end = u32(data, base + 0x0B6C) if 0x0B70 <= size else size
+        if not (move_event_base < move_event_table_end <= size):
+            move_event_table_end = size
+        move_event_action_names: dict[int, str] = {}
         if primary_lookup % 4 == 0 and primary_count > 0 and primary_lookup + primary_count * action_record_size <= size:
             for action_rel in range(primary_lookup, primary_lookup + primary_count * action_record_size, action_record_size):
-                action_index = u32(data, base + action_rel + 0x34)
-                if 0 <= action_index < indexed_offset_count:
-                    ia_index_action_names.setdefault(
-                        action_index,
-                        ps2_action_record_display_name(data, strings, base, action_rel),
-                    )
-        ranges: list[tuple[int, int, int, int]] = []
-        for index, rel in enumerate(range(indexed_offsets, indexed_base, 4)):
-            raw = u32(data, base + rel)
-            if raw == 0:
+                count_first = u32(data, base + action_rel + 0x28)
+                event_count = count_first & 0xFFFF
+                first_event = (count_first >> 16) & 0xFFFF
+                if event_count == 0 or first_event >= move_event_count:
+                    continue
+                action_name = ps2_action_record_display_name(data, strings, base, action_rel)
+                for event_index in range(first_event, min(first_event + event_count, move_event_count)):
+                    move_event_action_names.setdefault(event_index, action_name)
+        for event_index in range(move_event_count):
+            start_offset = u16(data, base + move_event_offsets + event_index * 2)
+            end_offset = u16(data, base + move_event_offsets + (event_index + 1) * 2)
+            start = move_event_base + start_offset
+            end = move_event_base + end_offset
+            if not (move_event_base <= start < end <= move_event_table_end):
                 continue
-            end_offset = (raw >> 16) & 0xFFFF
-            start_offset = raw & 0xFFFF
-            if (
-                indexed_base_size > 0
-                and start_offset % 4 == 0
-                and end_offset % 4 == 0
-                and 0 <= start_offset < indexed_base_size
-            ):
-                if end_offset == 0 and index == ((indexed_base - indexed_offsets) // 4) - 1:
-                    end_exclusive = indexed_base_size
-                else:
-                    end_exclusive = end_offset + 4
-                if start_offset < end_exclusive <= indexed_base_size:
-                    ranges.append((index, rel, indexed_base + start_offset, indexed_base + end_exclusive))
-        used_range_stems: dict[str, int] = {}
-        for index, offset_rel, start, end in ranges:
-            action_name = ia_index_action_names.get(index)
-            if not action_name:
+            event_type = u32(data, base + start)
+            if event_type >= 0x100:
                 continue
-            stem_base = f"IndexedActionBase.{meaningful_stem(action_name)}"
-            duplicate = used_range_stems.get(stem_base, 0)
-            used_range_stems[stem_base] = duplicate + 1
-            stem = stem_base
+            action_name = move_event_action_names.get(event_index, f"Index{event_index:04d}")
+            stem = f"MoveEvent.{meaningful_stem(action_name)}.Event{event_index:04d}_{ps2_move_event_type_name(event_type)}"
             roots.setdefault(start, stem)
-            used_field_names: set[str] = set()
-            for rel in range(start, end, 4):
+            labels[start] = f"{stem}.Type"
+            forced_types[start] = "int"
+            used_field_names: set[str] = {"Type"}
+            for rel in range(start + 4, end, 4):
+                field_rel = rel - start
                 raw = u32(data, base + rel)
                 if raw == 0 or raw == 0xFFFFFFFF:
                     continue
+                if event_type == 0 and field_rel in PS2_ATTACK_PROPERTY_EVENT_FIELD_TYPES:
+                    labels[rel] = f"{stem}.{ps2_move_event_field_name(event_type, field_rel, PS2_ATTACK_PROPERTY_EVENT_FIELD_TYPES[field_rel])}"
+                    forced_types[rel] = PS2_ATTACK_PROPERTY_EVENT_FIELD_TYPES[field_rel]
+                    continue
                 string_index = string_id_at(data, strings, base + rel)
                 if string_index is not None:
-                    field_name = ps2_action_base_string_field(strings[string_index], used_field_names)
+                    field_name = ps2_move_event_field_name(event_type, field_rel, "string", strings[string_index])
+                    duplicate = field_name
+                    suffix = 2
+                    while duplicate in used_field_names:
+                        duplicate = f"{field_name}{suffix:02d}"
+                        suffix += 1
+                    field_name = duplicate
+                    used_field_names.add(field_name)
                     labels[rel] = f"{stem}.{field_name}"
                     forced_types[rel] = "string"
                     continue
                 kind = ps2_value_type(data, base, rel, size)
-                value = f32(data, base + rel) if kind == "f32" else 0.0
-                field_name = ps2_action_base_numeric_field(kind, raw, value, used_field_names)
+                field_name = ps2_move_event_field_name(event_type, field_rel, kind)
+                duplicate = field_name
+                suffix = 2
+                while duplicate in used_field_names:
+                    duplicate = f"{field_name}{suffix:02d}"
+                    suffix += 1
+                field_name = duplicate
+                used_field_names.add(field_name)
                 labels[rel] = f"{stem}.{field_name}"
                 forced_types[rel] = kind
 
@@ -2789,11 +2940,11 @@ def ps2_root_lines(
         if key.startswith("primarylookup"):
             return (2, "RootTables.PrimaryLookup")
         if key.startswith("actionrecord"):
-            return (3, "RootTables.ActionRecords")
-        if key.startswith(("indexedactionoffsets", "iaoffsets", "iaoffset")):
-            return (4, "RootTables.IAOffsets")
-        if key.startswith("indexedactionbase"):
-            return (5, "RootTables.IndexedActionBase")
+            return (3, "RootTables.DMonsterMoves")
+        if key.startswith(("moveeventoffsets", "moveeventoffset")):
+            return (4, "RootTables.MoveEventOffsets")
+        if key.startswith("moveevent"):
+            return (5, "RootTables.MoveEvents")
         if key.startswith(("actionlookup", "trailingactions", "rangedactions")):
             return (6, "RootTables.ActionLookups")
         if key.startswith("effectlookup"):
@@ -2820,20 +2971,19 @@ def ps2_root_lines(
         lines.append("# Click on table names to view contents")
     generic_toc_stems = {
         "EffectLookup",
-        "IAOffsets",
-        "IndexedActionOffsets",
-        "IndexedActionBase",
+        "MoveEventOffsets",
+        "MoveEvents",
         "PrimaryLookup",
     }
     for group_name in sorted(grouped, key=lambda name: (group_order[name], name)):
         group_entries = list(grouped[group_name])
-        if group_name in {"RootTables.EffectLookup", "RootTables.IAOffsets", "RootTables.PrimaryLookup"}:
+        if group_name in {"RootTables.EffectLookup", "RootTables.MoveEventOffsets", "RootTables.PrimaryLookup"}:
             group_entries = [
                 (rel, stem)
                 for rel, stem in group_entries
                 if display_name(stem) not in generic_toc_stems
             ]
-        elif group_name == "RootTables.IndexedActionBase":
+        elif group_name == "RootTables.MoveEvents":
             specific_entries = [
                 (rel, stem)
                 for rel, stem in group_entries
@@ -2879,13 +3029,61 @@ def ps2_spacing_section(label: str) -> str:
     parts = label.split(".")
     if len(parts) >= 4 and parts[0] == "EffectTable":
         return ".".join(parts[:3])
-    if len(parts) >= 3 and parts[0] == "BodyPartActionLookup":
-        return ".".join(parts[:3])
+    if len(parts) >= 2 and parts[0] == "BodyPartActionLookup":
+        return ".".join(parts[:2])
     if len(parts) >= 2 and parts[0] in {"BeamFightActions", "RangedAction"}:
         return ".".join(parts[:2])
-    if len(parts) >= 2 and parts[0] in {"ActionRecord", "IndexedActionBase", "EffectTable", "BodyPart", "PrimaryData"}:
+    if len(parts) >= 3 and parts[0] == "DMonsterMove" and parts[2].startswith("Variant"):
+        return ".".join(parts[:3])
+    if len(parts) >= 2 and parts[0] in {"DMonsterMove", "MoveEvent", "EffectTable", "BodyPart", "PrimaryData"}:
         return ".".join(parts[:2])
     return parts[0]
+
+
+def ps2_action_record_subsection(label: str) -> str:
+    parts = label.split(".")
+    if len(parts) < 3 or parts[0] != "DMonsterMove":
+        return ""
+    if len(parts) >= 4 and parts[2].startswith("Variant"):
+        record = display_name(".".join(parts[:3]))
+        field = parts[3]
+    else:
+        record = display_name(".".join(parts[:2]))
+        field = parts[2]
+    if field in {
+        "AnimRate",
+        "MoveClass",
+        "InputClass",
+        "ReactionLevel",
+        "DamageScale",
+        "HitStopScale",
+        "HitDirectionX",
+        "HitDirectionZ",
+        "FacingDirectionX",
+        "FacingDirectionZ",
+        "MoveCategory",
+        "AIScoreEdgeId",
+    }:
+        return f"{record} combat/reaction fields"
+    if field in {"MoveEventCountFirstIndex", "HitBehaviorFlags", "CueNames", "ActionIndex"}:
+        return f"{record} packed hit/event fields"
+    if field in {
+        "StartFrame",
+        "ActiveFrame",
+        "RecoveryFrame",
+        "CancelWindow",
+        "Damage",
+        "RootMotionX",
+        "RootMotionZ",
+        "RootMotionY",
+        "AIScoreWeight",
+    }:
+        return f"{record} timing/damage/AI fields"
+    if field in {"ReactionDamageFlags", "CounterAttackParam", "CounterAttackCompare", "IgnoreAttackHeight", "AdjustReactionParam"}:
+        return f"{record} packed reaction/counterattack fields"
+    if field in {"Animation", "MoveName"}:
+        return f"{record} linked move/name fields"
+    return ""
 
 
 def ps2_skeleton_node_toc_lines(skeleton_node_names: dict[int, str]) -> list[str]:
@@ -3040,6 +3238,7 @@ def export_txt(bundle_path: Path, out_path: Path) -> None:
 
     record_starts = {int(record["rel"]): record for record in chanims}
     previous_section = ""
+    previous_action_subsection = ""
     export_rels = set(labels) | set(fixed_ascii_by_rel)
     for rel in sorted(export_rels, key=ps2_row_sort_key):
         if rel < 0 or rel >= size:
@@ -3054,6 +3253,7 @@ def export_txt(bundle_path: Path, out_path: Path) -> None:
             if previous_section and section != previous_section and lines[-1] != "":
                 lines.append("")
             previous_section = section
+            previous_action_subsection = ""
             value_text = quote_text(read_fixed_ascii(data, base + rel, field_size))
             lines.append(f"@0x{rel:06X} ascii[0x{field_size:X}] {label} = {value_text}")
             continue
@@ -3063,7 +3263,16 @@ def export_txt(bundle_path: Path, out_path: Path) -> None:
         section = ps2_spacing_section(label)
         if previous_section and section != previous_section and lines[-1] != "":
             lines.append("")
+            previous_action_subsection = ""
         previous_section = section
+        if section.startswith("DMonsterMove.") and lines[-1] == "":
+            lines.append(f"## {display_name(section)} 000MONSTER_DATA+0x{rel:06X}")
+        action_subsection = ps2_action_record_subsection(label)
+        if action_subsection and action_subsection != previous_action_subsection:
+            if lines[-1] != "":
+                lines.append("")
+            lines.append(f"# {action_subsection}")
+            previous_action_subsection = action_subsection
         force = forced_types.get(rel)
         if force is None and rel in mask_covered_offsets:
             raw = u32(data, base + rel)
@@ -3075,6 +3284,8 @@ def export_txt(bundle_path: Path, out_path: Path) -> None:
         if row_type == "ref":
             raw = u32(data, base + rel)
             value_text = ref_value_text(raw, size, labels, explicit_roots, known_stems)
+            if label.endswith(".CueNames") and value_text.startswith("CueNames."):
+                value_text = value_text.rsplit(".", 1)[-1]
             if label.startswith("BodyPartActionLookup.") and label.endswith(".ActionEventRef") and re.match(r"^-?\d+$", value_text):
                 value_text = display_name(label[: -len(".ActionEventRef")].replace("BodyPartActionLookup.", "ActionEvent.", 1))
             if label.startswith("BodyPartActionLookup.Ref0x") and value_text and not re.match(r"^-?\d+$", value_text):

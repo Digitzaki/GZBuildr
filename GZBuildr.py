@@ -41,8 +41,18 @@ import importlib.util
 import subprocess
 import difflib
 import threading
+import webbrowser
 from datetime import datetime, timezone
 from pathlib import Path
+
+try:
+    from update_checker import APP_VERSION, REPOSITORY_URL, check_for_updates
+    HAS_UPDATE_CHECKER = True
+except Exception:
+    APP_VERSION = "3.2.0"
+    REPOSITORY_URL = "https://github.com/Digitzaki/GZBuildr"
+    check_for_updates = None
+    HAS_UPDATE_CHECKER = False
 
 try:
     from PIL import Image, ImageTk
@@ -1447,8 +1457,17 @@ class PipeworksParser:
             entry['string_id'] = string_count + idx
             original_strings.append(entry['filename'].encode('ascii', errors='replace'))
 
+        extra_string_values = []
+        for value in getattr(self, '_extra_string_values', []) or []:
+            if value is None:
+                continue
+            raw_value = str(value).encode('ascii', errors='replace')
+            if raw_value and raw_value not in original_strings and raw_value not in extra_string_values:
+                extra_string_values.append(raw_value)
+        original_strings.extend(extra_string_values)
+
         new_string_table = bytearray()
-        new_string_table.extend(struct.pack('<I', string_count + len(appended_entries)))
+        new_string_table.extend(struct.pack('<I', len(original_strings)))
         offset_table_size = 4 + (4 * len(original_strings))
         string_payload = bytearray()
         for value in original_strings:
@@ -1529,7 +1548,7 @@ class PipeworksParser:
                 rel_pos = offsets[idx]
                 fixed_string_table[rel_pos:rel_pos + len(old_bytes)] = new_bytes + (b'\x00' * (len(old_bytes) - len(new_bytes)))
 
-            if can_preserve_string_offsets and len(new_metadata) <= metadata_capacity:
+            if not extra_string_values and can_preserve_string_offsets and len(new_metadata) <= metadata_capacity:
                 header_and_toc = bytearray()
                 header_and_toc.extend(prefix)
                 header_and_toc.extend(new_toc)
@@ -1983,15 +2002,32 @@ class PipeworksParser:
                 "metadata_b64": base64.b64encode(entry.get('metadata_bytes') or b'').decode('ascii'),
             })
 
-        manifest_path = os.path.join(output_dir, "_gzbuildr_pipeworks_manifest.json")
+        metadata_dir = os.path.join(output_dir, ".gzbuildr")
+        os.makedirs(metadata_dir, exist_ok=True)
+        if sys.platform == "win32":
+            try:
+                current_attrs = ctypes.windll.kernel32.GetFileAttributesW(metadata_dir)
+                if current_attrs != 0xFFFFFFFF:
+                    ctypes.windll.kernel32.SetFileAttributesW(metadata_dir, current_attrs | 0x02)
+            except Exception:
+                pass
+        bundle_name = safe_path_name(Path(self.filepath).stem)
+        manifest_path = os.path.join(metadata_dir, f"GZBuildr_{bundle_name}_Log.json")
         with open(manifest_path, 'w', encoding='utf-8') as f:
             json.dump(manifest, f, indent=2)
 
     def build_pipeworks_from_directory(self, source_dir, output_path, custom_alignments=None):
         """Build a Pipeworks bundle from an extracted folder, using manifest metadata when available."""
-        manifest_path = os.path.join(source_dir, "_gzbuildr_pipeworks_manifest.json")
-        if os.path.exists(manifest_path):
-            return self._build_pipeworks_from_manifest(source_dir, output_path, manifest_path, custom_alignments)
+        metadata_dir = os.path.join(source_dir, ".gzbuildr")
+        named_logs = sorted(Path(metadata_dir).glob("GZBuildr_*_Log.json")) if os.path.isdir(metadata_dir) else []
+        manifest_candidates = [
+            *(str(path) for path in named_logs),
+            os.path.join(metadata_dir, "pipeworks_manifest.json"),
+            os.path.join(source_dir, "_gzbuildr_pipeworks_manifest.json"),
+        ]
+        for manifest_path in manifest_candidates:
+            if os.path.exists(manifest_path):
+                return self._build_pipeworks_from_manifest(source_dir, output_path, manifest_path, custom_alignments)
         return self._build_pipeworks_from_numeric_folders(source_dir, output_path, custom_alignments)
 
     def _build_pipeworks_from_manifest(self, source_dir, output_path, manifest_path, custom_alignments=None):
@@ -2422,7 +2458,9 @@ class PipeworksParser:
             if width <= 0 or height <= 0 or width > 8192 or height > 8192:
                 return None
             fmt_code = struct.unpack_from('<H', main_data, 0x00)[0]
-            fmt_name = self._choose_ps2_texture_format(fmt_code, width, height, resource_size)
+            ps2_storage_word = struct.unpack_from('<I', main_data, 0x04)[0] if len(main_data) >= 0x08 else 0
+            mip_count = main_data[0x0C] if len(main_data) > 0x0C else 1
+            fmt_name = self._choose_ps2_texture_format(fmt_code, width, height, resource_size, mip_count)
             if not fmt_name:
                 return None
             if fmt_name == 'PS2_RGBA32' and width > 0:
@@ -2435,22 +2473,38 @@ class PipeworksParser:
                 'format_code': fmt_code,
                 'format': fmt_name,
                 'platform': 'ps2',
+                'mip_count': mip_count,
+                'storage_word': ps2_storage_word,
             }
         width_height = struct.unpack_from('>I', main_data, 0x08)[0]
         width = width_height >> 16
         height = width_height & 0xFFFF
         if width <= 0 or height <= 0 or width > 8192 or height > 8192:
             return None
-        fmt_code = struct.unpack_from('>H', main_data, 0x0C)[0]
+        # Wii texture records store the GX texture format as a big-endian word
+        # at 0x04. The value at 0x0C is the mip count (for example, 8 for a
+        # complete 512x512 chain), not a texture format.
+        fmt_code = struct.unpack_from('>I', main_data, 0x04)[0]
+        if fmt_code not in (0, 1, 2, 3, 4, 5, 6, 14):
+            # Retain support for older/alternate records that used the field
+            # previously read by GZBuildr.
+            fmt_code = struct.unpack_from('>H', main_data, 0x0C)[0]
         fmt_name = self._choose_texture_format(fmt_code, width, height, resource_size)
         if not fmt_name:
             return None
         return {'width': width, 'height': height, 'format_code': fmt_code, 'format': fmt_name, 'platform': 'gcn'}
 
-    def _choose_ps2_texture_format(self, fmt_code, width, height, resource_size):
+    def _choose_ps2_texture_format(self, fmt_code, width, height, resource_size, mip_count=1):
         if fmt_code == 3:
+            psmt4_base = self._texture_block_size('PS2_PSMT4', width, height)
+            psmt4_chain = self._texture_chain_size('PS2_PSMT4', width, height, max(1, mip_count))
+            if resource_size == psmt4_chain or resource_size == psmt4_base or resource_size < width * height:
+                return 'PS2_PSMT4'
             return 'PS2_PSMT8'
         if fmt_code == 1:
+            rgba_chain_size = self._texture_chain_size('PS2_RGBA32', width, height, max(1, mip_count))
+            if resource_size == rgba_chain_size:
+                return 'PS2_RGBA32'
             if width > 0 and resource_size % (width * 4) == 0:
                 actual_height = resource_size // (width * 4)
                 if 0 < actual_height <= height:
@@ -2474,6 +2528,8 @@ class PipeworksParser:
         height = max(1, int(height))
         if fmt_name == 'PS2_PSMT8':
             return width * height
+        if fmt_name == 'PS2_PSMT4':
+            return (width * height + 1) // 2
         if fmt_name == 'PS2_RGBA32':
             return width * height * 4
         if fmt_name in ('PS2_RGB565', 'PS2_BGR555'):
@@ -2563,6 +2619,9 @@ class PipeworksParser:
         base = os.path.basename(str(texture_name or '')).lower()
         if base.endswith('.resource'):
             base = base[:-9]
+        if base.endswith('_a') and info.get('format') == 'I4':
+            info = dict(info)
+            info['intensity_as_alpha'] = True
         if base.endswith('_c') and info.get('format') in ('IA8', 'RGB565', 'RGB5A3'):
             info = dict(info)
             info['format'] = 'RGB5A3'
@@ -2750,31 +2809,40 @@ class PipeworksParser:
         return bytes(out)
 
     def _ps2_palette_rgba(self, palette_data):
-        raw = palette_data[:1024]
-        if len(raw) < 1024:
+        if len(palette_data) >= 1024:
+            raw = palette_data[:1024]
+            colors = [tuple(raw[i:i + 4]) for i in range(0, 1024, 4)]
+            reordered = []
+            for index in range(0, 256, 32):
+                reordered.extend(
+                    colors[index:index + 8]
+                    + colors[index + 16:index + 24]
+                    + colors[index + 8:index + 16]
+                    + colors[index + 24:index + 32]
+                )
+            return [(r, g, b, min(255, a * 2)) for r, g, b, a in reordered]
+        if len(palette_data) >= 64:
+            raw = palette_data[:64]
+            return [(r, g, b, min(255, a * 2)) for r, g, b, a in (tuple(raw[i:i + 4]) for i in range(0, 64, 4))]
+        if len(palette_data) < 16:
             return None
-        colors = [tuple(raw[i:i + 4]) for i in range(0, 1024, 4)]
-        reordered = []
-        for index in range(0, 256, 32):
-            reordered.extend(
-                colors[index:index + 8]
-                + colors[index + 16:index + 24]
-                + colors[index + 8:index + 16]
-                + colors[index + 24:index + 32]
-            )
-        return [(r, g, b, min(255, a * 2)) for r, g, b, a in reordered]
+        return None
 
-    def _ps2_palette_resource_from_rgba(self, palette):
-        colors = list(palette[:256])
-        while len(colors) < 256:
+    def _ps2_palette_resource_from_rgba(self, palette, color_count=256):
+        color_count = 16 if color_count <= 16 else 256
+        colors = list(palette[:color_count])
+        while len(colors) < color_count:
             colors.append((0, 0, 0, 0))
-        raw_order = [(0, 0, 0, 0)] * 256
-        for base in range(0, 256, 32):
-            chunk = colors[base:base + 32]
-            raw_order[base:base + 8] = chunk[0:8]
-            raw_order[base + 8:base + 16] = chunk[16:24]
-            raw_order[base + 16:base + 24] = chunk[8:16]
-            raw_order[base + 24:base + 32] = chunk[24:32]
+        if color_count == 16:
+            raw_order = colors
+        else:
+            raw_order = [(0, 0, 0, 0)] * 256
+            for base in range(0, 256, 32):
+                chunk = colors[base:base + 32]
+                raw_order[base:base + 8] = chunk[0:8]
+                raw_order[base + 8:base + 16] = chunk[16:24]
+                raw_order[base + 16:base + 24] = chunk[8:16]
+                raw_order[base + 24:base + 32] = chunk[24:32]
         out = bytearray()
         for r, g, b, a in raw_order:
             stored_a = max(0, min(128, round(a / 2)))
@@ -2817,6 +2885,8 @@ class PipeworksParser:
         except Exception:
             return None
         texture_name = os.path.basename(texture_entry.get('name', ''))
+        if texture_name.lower().endswith('.resource'):
+            texture_name = texture_name[:-9]
         candidates = {
             f"{texture_name}.pal.resource".lower(),
             f"{texture_name}.pal".lower(),
@@ -2830,10 +2900,55 @@ class PipeworksParser:
                 return entry
         return None
 
-    def _ps2_indexed_texture_uses_swizzle(self, texture_entry):
+    def _ps2_psmt4_offset(self, x, y, width, height):
+        pages_horz = (width + 127) // 128
+        pages_vert = (height + 127) // 128
+        page_x = x & ~0x7F
+        page_y = y & ~0x7F
+        page_number = (page_y // 128) * pages_horz + (page_x // 128)
+        page32_y = (page_number // max(1, pages_vert)) * 32
+        page32_x = (page_number % max(1, pages_vert)) * 64
+        page_location = page32_y * height * 2 + page32_x * 4
+        loc_x = x & 0x7F
+        loc_y = y & 0x7F
+        block_location = ((loc_x & ~0x1F) >> 1) * height + (loc_y & ~0x0F) * 2
+        swap_selector = (((y + 2) >> 2) & 1) * 4
+        pos_y = (((y & ~3) >> 1) + (y & 1)) & 7
+        column_location = pos_y * height * 2 + ((x + swap_selector) & 7) * 4
+        byte_num = (x >> 3) & 3
+        return page_location + block_location + column_location + byte_num, (y >> 1) & 1
+
+    def _ps2_unswizzle4(self, data, width, height):
+        indexes = bytearray(width * height)
+        for y in range(height):
+            for x in range(width):
+                src, high_nibble = self._ps2_psmt4_offset(x, y, width, height)
+                if src < len(data):
+                    byte = data[src]
+                    indexes[y * width + x] = ((byte >> 4) & 0x0F) if high_nibble else (byte & 0x0F)
+        return bytes(indexes)
+
+    def _ps2_swizzle4(self, indexes, width, height):
+        out = bytearray((width * height + 1) // 2)
+        for y in range(height):
+            for x in range(width):
+                dst, high_nibble = self._ps2_psmt4_offset(x, y, width, height)
+                if dst < len(out):
+                    value = indexes[y * width + x] & 0x0F
+                    if high_nibble:
+                        out[dst] = (out[dst] & 0x0F) | (value << 4)
+                    else:
+                        out[dst] = (out[dst] & 0xF0) | value
+        return bytes(out)
+
+    def _ps2_indexed_texture_uses_swizzle(self, texture_entry, info=None):
         ext = os.path.splitext(self.filepath.lower())[1]
         if ext in ('.bdp', '.bsf'):
-            return False
+            if not info:
+                return False
+            if int(info.get('mip_count') or 1) > 1:
+                return True
+            return bool(int(info.get('storage_word') or 0) & 0x40000000)
         return True
 
     def _decode_ps2_texture_image(self, resource_data, info, texture_entry):
@@ -2842,26 +2957,32 @@ class PipeworksParser:
         width = info['width']
         height = info['height']
         fmt_name = info['format']
-        if fmt_name == 'PS2_PSMT8':
+        if fmt_name in ('PS2_PSMT8', 'PS2_PSMT4'):
             palette_entry = self._find_ps2_palette_entry(texture_entry)
             if palette_entry:
                 palette_data = self.read_bytes(palette_entry['offset'], palette_entry['size'])
                 palette = self._ps2_palette_rgba(palette_data)
             else:
-                palette = [(i, i, i, 255) for i in range(256)]
+                color_count = 16 if fmt_name == 'PS2_PSMT4' else 256
+                palette = [(i * 255 // max(1, color_count - 1),) * 3 + (255,) for i in range(color_count)]
             if not palette:
                 return None
-            raw_indexes = resource_data[:width * height]
-            if self._ps2_indexed_texture_uses_swizzle(texture_entry):
-                indexes = self._ps2_unswizzle8(raw_indexes, width, height)
+            if fmt_name == 'PS2_PSMT4':
+                indexes = self._ps2_unswizzle4(resource_data, width, height)
             else:
+                raw_indexes = resource_data[:width * height]
+                if len(raw_indexes) < width * height:
+                    return None
                 indexes = raw_indexes
+            if fmt_name == 'PS2_PSMT8' and self._ps2_indexed_texture_uses_swizzle(texture_entry, info):
+                indexes = self._ps2_unswizzle8(raw_indexes, width, height)
             img = Image.new('RGBA', (width, height))
             pix = img.load()
+            palette_limit = len(palette)
             for y in range(height):
                 row = y * width
                 for x in range(width):
-                    pix[x, y] = palette[indexes[row + x]]
+                    pix[x, y] = palette[indexes[row + x] % palette_limit]
             return img
         if fmt_name == 'PS2_BGR555':
             needed = width * height * 2
@@ -2905,34 +3026,36 @@ class PipeworksParser:
         height = info['height']
         fmt_name = info['format']
         resample = getattr(Image, 'Resampling', Image).LANCZOS if hasattr(Image, 'LANCZOS') or hasattr(Image, 'Resampling') else 1
-        if fmt_name == 'PS2_PSMT8':
+        if fmt_name in ('PS2_PSMT8', 'PS2_PSMT4'):
             layout, used_size = self._texture_mip_layout(fmt_name, width, height, len(original_resource_data))
             if not layout:
                 return None
             base_image = image.convert('RGBA').resize((width, height), resample)
+            color_count = 16 if fmt_name == 'PS2_PSMT4' else 256
             try:
-                palette_image = base_image.convert('P', palette=Image.Palette.ADAPTIVE, colors=256)
+                palette_image = base_image.convert('P', palette=Image.Palette.ADAPTIVE, colors=color_count)
             except AttributeError:
-                palette_image = base_image.convert('P', palette=Image.ADAPTIVE, colors=256)
+                palette_image = base_image.convert('P', palette=Image.ADAPTIVE, colors=color_count)
             raw_palette = palette_image.getpalette() or []
             alpha_source = base_image.getchannel('A')
-            alpha_by_index = [255] * 256
+            alpha_by_index = [255] * color_count
             base_indexes = list(palette_image.getdata())
             base_alpha = list(alpha_source.getdata())
-            alpha_totals = [0] * 256
-            alpha_counts = [0] * 256
+            alpha_totals = [0] * color_count
+            alpha_counts = [0] * color_count
             for idx, alpha in zip(base_indexes, base_alpha):
-                alpha_totals[idx] += alpha
-                alpha_counts[idx] += 1
+                if idx < color_count:
+                    alpha_totals[idx] += alpha
+                    alpha_counts[idx] += 1
             palette = []
-            for index in range(256):
+            for index in range(color_count):
                 r = raw_palette[index * 3] if index * 3 < len(raw_palette) else 0
                 g = raw_palette[index * 3 + 1] if index * 3 + 1 < len(raw_palette) else 0
                 b = raw_palette[index * 3 + 2] if index * 3 + 2 < len(raw_palette) else 0
                 if alpha_counts[index]:
                     alpha_by_index[index] = round(alpha_totals[index] / alpha_counts[index])
                 palette.append((r, g, b, alpha_by_index[index]))
-            palette_resource = self._ps2_palette_resource_from_rgba(palette)
+            palette_resource = self._ps2_palette_resource_from_rgba(palette, color_count)
             palette_entry = self._find_ps2_palette_entry(texture_entry)
             if not palette_entry:
                 print(f"      WARNING CRITICAL: PS2 indexed texture has no palette resource for {texture_entry.get('name')}")
@@ -2950,7 +3073,10 @@ class PipeworksParser:
                         dither=Image.Dither.NONE if hasattr(Image, 'Dither') else 0,
                     )
                 indexes = bytes(indexed.getdata())
-                if self._ps2_indexed_texture_uses_swizzle(texture_entry):
+                if fmt_name == 'PS2_PSMT4':
+                    indexes = bytes((idx & 0x0F) for idx in indexes)
+                    new_data.extend(self._ps2_swizzle4(indexes, mip_width, mip_height))
+                elif self._ps2_indexed_texture_uses_swizzle(texture_entry, info):
                     new_data.extend(self._ps2_swizzle8(indexes, mip_width, mip_height))
                 else:
                     new_data.extend(indexes)
@@ -2975,17 +3101,26 @@ class PipeworksParser:
                 out.extend(original_resource_data[used_size:])
             return bytes(out)
         if fmt_name == 'PS2_RGBA32':
-            img = image.convert('RGBA').resize((width, height), resample)
             out = bytearray()
-            for r, g, b, a in img.getdata():
-                out.extend(bytes((r, g, b, max(0, min(128, round(a / 2))))))
+            layout, used_size = self._texture_mip_layout(fmt_name, width, height, len(original_resource_data))
+            if not layout:
+                return None
+            for mip_width, mip_height, _offset, _size in layout:
+                img = image.convert('RGBA').resize((mip_width, mip_height), resample)
+                for r, g, b, a in img.getdata():
+                    out.extend(bytes((r, g, b, max(0, min(128, round(a / 2))))))
+            if used_size < len(original_resource_data):
+                out.extend(original_resource_data[used_size:])
             return bytes(out)
         return None
 
-    def _encode_texture_image(self, image, fmt_name, width, height):
+    def _encode_texture_image(self, image, fmt_name, width, height, intensity_as_alpha=False):
         resample = getattr(Image, 'Resampling', Image).LANCZOS if hasattr(Image, 'LANCZOS') or hasattr(Image, 'Resampling') else 1
         if fmt_name in ('I4', 'I8'):
-            img = image.convert('L').resize((width, height), resample)
+            if fmt_name == 'I4' and intensity_as_alpha and 'A' in image.getbands():
+                img = image.getchannel('A').resize((width, height), resample)
+            else:
+                img = image.convert('L').resize((width, height), resample)
             pix = img.load()
         elif fmt_name == 'RGB565':
             img = image.convert('RGB').resize((width, height), resample)
@@ -3154,6 +3289,9 @@ class PipeworksParser:
             image = self._decode_texture_image(resource_data[:base_size], info['format'], info['width'], info['height'])
         if not image:
             return
+        if info.get('intensity_as_alpha'):
+            intensity = image.getchannel('R')
+            image.putalpha(intensity)
         png_path = output_path[:-9] + '.png' if output_path.lower().endswith('.resource') else output_path + '.png'
         image.save(png_path)
         try:
@@ -3228,7 +3366,13 @@ class PipeworksParser:
             return None
         new_data = bytearray()
         for width, height, _offset, _size in layout:
-            new_data.extend(self._encode_texture_image(source_image, info['format'], width, height))
+            new_data.extend(self._encode_texture_image(
+                source_image,
+                info['format'],
+                width,
+                height,
+                intensity_as_alpha=bool(info.get('intensity_as_alpha')),
+            ))
         if used_size < len(original_resource_data):
             new_data.extend(original_resource_data[used_size:])
             print(f"      Info: Preserved {len(original_resource_data) - used_size} trailing texture byte(s)")
@@ -3621,7 +3765,8 @@ class PipeworksParser:
                     for file_num in skipped_renames:
                         print(f"  CMP safe rename: skipped render-critical file {file_num}")
                         renamed_files.pop(file_num, None)
-            edited_entries = bool(renamed_files)
+            extra_string_values = list(getattr(self, '_extra_string_values', []) or [])
+            edited_entries = bool(renamed_files or extra_string_values)
 
             # Get the actual TOC entry count from header (not the parsed entries which splits main/resource)
             toc_start = 0x78
@@ -3634,9 +3779,11 @@ class PipeworksParser:
                 edited_file_data_map = {}
                 original_names = {}
 
-                print(f"\nApplying rename edits...")
+                print(f"\nApplying entry/string-table edits...")
                 if renamed_files:
                     print(f"  Renaming {len(renamed_files)} file(s)")
+                if extra_string_values:
+                    print(f"  Appending {len(extra_string_values)} string table value(s)")
 
                 for i in range(self.file_count):
                     toc_offset = toc_start + (i * 0x12)
@@ -3826,7 +3973,7 @@ class PipeworksParser:
                 header_and_toc = new_data[:header_size]
 
             # Build new data sections
-            if not new_records and self._try_rebuild_preserving_slots(
+            if not new_records and not extra_string_values and self._try_rebuild_preserving_slots(
                 output_bdg_path,
                 header_and_toc,
                 toc_entry_count,
@@ -6928,6 +7075,74 @@ class PipeworksGUI:
         ttk.Radiobutton(theme_frame, text="Dark", variable=theme_var, value="dark", command=apply_theme_choice).pack(side=tk.LEFT, padx=(0, 12))
         ttk.Radiobutton(theme_frame, text="Light", variable=theme_var, value="light", command=apply_theme_choice).pack(side=tk.LEFT)
 
+        def show_update_result(result=None, error=None):
+            if not window.winfo_exists():
+                return
+            update_btn.config(text="Check Updates", state=tk.NORMAL)
+            if error is not None:
+                messagebox.showerror("Update Check", str(error), parent=window)
+                return
+
+            status = result.get("status")
+            latest = result.get("latest_tag") or "unknown"
+            if status == "update":
+                if result.get("reason") == "checksum":
+                    detail = (
+                        f"A newer GZBuildr {APP_VERSION} build is available.\n\n"
+                        "The release version is the same, but the downloadable EXE contains a mini-fix."
+                    )
+                else:
+                    detail = (
+                        "A new GZBuildr release is available.\n\n"
+                        f"Installed: {APP_VERSION}\n"
+                        f"Latest: {latest}"
+                    )
+                if messagebox.askyesno("Update Available", detail + "\n\nOpen the download page?", parent=window):
+                    webbrowser.open(result.get("download_url") or result.get("release_url") or REPOSITORY_URL)
+            elif status == "current":
+                hash_note = "\nThe executable hash also matches the release asset." if result.get("checksum_checked") else ""
+                messagebox.showinfo(
+                    "GZBuildr Is Current",
+                    f"GZBuildr {APP_VERSION} is up to date.{hash_note}",
+                    parent=window,
+                )
+            elif status == "ahead":
+                messagebox.showinfo(
+                    "Development Build",
+                    f"This build ({APP_VERSION}) is newer than the latest release ({latest}).",
+                    parent=window,
+                )
+            elif status == "no_release":
+                messagebox.showinfo("Update Check", "No published GZBuildr release was found.", parent=window)
+            else:
+                messagebox.showwarning(
+                    "Update Check",
+                    f"Could not compare version {APP_VERSION} with release tag {latest}.",
+                    parent=window,
+                )
+
+        def begin_update_check():
+            if not HAS_UPDATE_CHECKER or check_for_updates is None:
+                messagebox.showerror("Update Check", "The GZBuildr update checker is missing.", parent=window)
+                return
+            update_btn.config(text="Checking...", state=tk.DISABLED)
+
+            def worker():
+                try:
+                    result = check_for_updates()
+                except Exception as exc:
+                    self.root.after(0, lambda exc=exc: show_update_result(error=exc))
+                    return
+                self.root.after(0, lambda result=result: show_update_result(result=result))
+
+            threading.Thread(target=worker, daemon=True).start()
+
+        guide_url = "https://docs.google.com/document/d/1RUNoN5BRV3ffKtD6eFLpz6YigDBNTD5PU3UafYJerOc/edit?usp=sharing"
+        guide_btn = ttk.Button(theme_frame, text="Guide", command=lambda: webbrowser.open(guide_url))
+        guide_btn.pack(side=tk.RIGHT)
+        update_btn = ttk.Button(theme_frame, text="Check Updates", command=begin_update_check)
+        update_btn.pack(side=tk.RIGHT, padx=(0, 6))
+
         folders_frame = ttk.LabelFrame(frame, text="Folders", padding="8")
         folders_frame.pack(fill=tk.X, pady=(0, 8))
         ttk.Button(folders_frame, text="Open Logs", command=lambda: open_folder(get_logs_dir())).pack(side=tk.LEFT, padx=(0, 6))
@@ -6998,7 +7213,7 @@ class PipeworksGUI:
 
         credits_label = tk.Label(
             frame,
-            text="Credits: Akira Ryuzaki (Digitzaki)",
+            text="Developer: Akira Ryuzaki (Digitzaki) | QuickBMS/.BSF: DylanRocket",
             font=("Segoe UI", 8),
             bg=APP_BG,
             fg=APP_TEXT_FG,
@@ -7759,9 +7974,10 @@ class PipeworksGUI:
         )
 
     def clear_root_table_folds(self):
-        for tag in getattr(self, "root_toc_fold_tags", {}).values():
+        for header_tag, content_tag in getattr(self, "root_toc_fold_tags", {}).items():
             try:
-                self.output_text.tag_delete(tag)
+                self.output_text.tag_delete(header_tag)
+                self.output_text.tag_delete(content_tag)
             except Exception:
                 pass
         self.root_toc_fold_tags = {}
@@ -7775,48 +7991,54 @@ class PipeworksGUI:
         if self.text_mode not in {"char_data", "level_data", "prx"}:
             return
         try:
-            total_lines = int(str(self.output_text.index("end-1c")).split(".", 1)[0])
+            document_lines = self.output_text.get("1.0", "end-1c").splitlines()
         except Exception:
             return
         fold_index = 0
-        line_no = 1
-        while line_no <= total_lines:
-            line_start = f"{line_no}.0"
-            line_end = f"{line_no}.end"
-            text = self.output_text.get(line_start, line_end).strip()
+        line_index = 0
+        total_lines = len(document_lines)
+        while line_index < total_lines:
+            text = document_lines[line_index].strip()
             if not re.match(r"^\[RootTables\.[^\]]+\]$", text):
-                line_no += 1
+                line_index += 1
                 continue
-            header_tag_start = line_start
-            header_tag_end = line_end
-            self.output_text.tag_add("root_table_header", header_tag_start, header_tag_end)
-            content_start_line = line_no + 1
-            content_end_line = content_start_line
-            while content_end_line <= total_lines:
-                content_text = self.output_text.get(f"{content_end_line}.0", f"{content_end_line}.end").strip()
+            line_no = line_index + 1
+            header_tag = f"root_toc_header_{fold_index}"
+            content_tag = f"root_toc_fold_{fold_index}"
+            self.output_text.tag_add("root_table_header", f"{line_no}.0", f"{line_no}.end")
+            self.output_text.tag_add(header_tag, f"{line_no}.0", f"{line_no}.end")
+
+            content_start_index = line_index + 1
+            content_end_index = content_start_index
+            while content_end_index < total_lines:
+                content_text = document_lines[content_end_index].strip()
                 if not content_text:
                     break
                 if content_text.startswith("["):
                     break
-                content_end_line += 1
-            if content_end_line > content_start_line:
-                tag = f"root_toc_fold_{fold_index}"
-                self.output_text.tag_add(tag, f"{content_start_line}.0", f"{content_end_line}.0")
-                self.output_text.tag_configure(tag, elide=True)
-                self.root_toc_fold_tags[str(line_no)] = tag
+                content_end_index += 1
+            if content_end_index > content_start_index:
+                content_start_line = content_start_index + 1
+                content_end_line = content_end_index + 1
+                self.output_text.tag_add(content_tag, f"{content_start_line}.0", f"{content_end_line}.0")
+                self.output_text.tag_configure(content_tag, elide=True)
+                self.root_toc_fold_tags[header_tag] = content_tag
                 fold_index += 1
-            line_no = max(content_end_line, line_no + 1)
+            line_index = max(content_end_index, line_index + 1)
 
     def _on_root_table_header_click(self, event):
         try:
             index = self.output_text.index(f"@{event.x},{event.y}")
-            line_no = index.split(".", 1)[0]
-            tag = self.root_toc_fold_tags.get(line_no)
-            if not tag:
+            header_tag = next(
+                (tag for tag in self.output_text.tag_names(index) if tag in self.root_toc_fold_tags),
+                None,
+            )
+            if header_tag is None:
                 return "break"
-            current = str(self.output_text.tag_cget(tag, "elide")).lower() in {"1", "true", "yes"}
-            self.output_text.tag_configure(tag, elide=not current)
-            self.root.after_idle(self.refresh_visible_editor_formatting)
+            content_tag = self.root_toc_fold_tags[header_tag]
+            current = str(self.output_text.tag_cget(content_tag, "elide")).lower() in {"1", "true", "yes"}
+            self.output_text.tag_configure(content_tag, elide=not current)
+            self.root.after_idle(self.refresh_visible_editor_syntax)
             return "break"
         except Exception:
             return "break"
@@ -7993,7 +8215,6 @@ class PipeworksGUI:
             )),
             ("syntax_number", re.compile(r"(?<![A-Za-z0-9_.])[-+]?(?:\d+\.\d*|\.\d+|\d+)(?:[eE][-+]?\d+)?(?![A-Za-z0-9_.])")),
             ("syntax_operator", re.compile(r"[{}=?:|]")),
-            ("syntax_asset", re.compile(r"(?<![A-Za-z0-9_./-])(?:[A-Za-z0-9_./-]+[ \t]+)*[A-Za-z0-9_./-]+\.(?:edf|prx|pvm|pwk|bsf|txt|xfg|ifc)\b", re.IGNORECASE)),
             ("syntax_string", re.compile(r'"(?:\\.|[^"\\])*"|\'(?:\\.|[^\'\\])*\'', re.DOTALL)),
             ("syntax_comment", re.compile(r"/\*.*?\*/|//[^\n]*|#[^\n]*|;[^\n]*", re.DOTALL)),
         ]
@@ -8009,18 +8230,42 @@ class PipeworksGUI:
                 end = f"{start_index}+{match.end()}c"
                 self.output_text.tag_add(tag, start, end)
         if self.text_mode in ("prx", "txt", "xfg", "ifc", "char_data", "level_data", "skeleton_type3"):
+            def key_member_split(key):
+                if key.startswith(("StartupRefs.", "StringRefs.")):
+                    return key.find(".")
+                return key.rfind(".")
+
             row_type_re = re.compile(r"^@0x[0-9A-Fa-f]+\s+([A-Za-z0-9_\[\]xXa-fA-F]+)", re.MULTILINE)
             for match in row_type_re.finditer(text):
                 self.output_text.tag_add("syntax_row_type", f"{start_index}+{match.start(1)}c", f"{start_index}+{match.end(1)}c")
             row_key_re = re.compile(r"^@0x[0-9A-Fa-f]+\s+[A-Za-z0-9_\[\]xXa-fA-F]+\s+([^\s=]+)\s*=", re.MULTILINE)
             for match in row_key_re.finditer(text):
                 key = match.group(1)
-                dot_index = key.rfind(".")
+                dot_index = key_member_split(key)
                 if dot_index > 0:
                     root_start = match.start(1)
-                    member_start = match.start(1) + dot_index
-                    self.output_text.tag_add("syntax_root", f"{start_index}+{root_start}c", f"{start_index}+{member_start}c")
-                    self.output_text.tag_add("syntax_member", f"{start_index}+{member_start}c", f"{start_index}+{match.end(1)}c")
+                    is_first_split_prefix = key.startswith(("StartupRefs.", "StringRefs."))
+                    is_stringref_asset = key.startswith("StringRefs.") and re.search(r"\.(?:edf|prx|pvm|pwk|bsf|txt|xfg|ifc)$", key, re.IGNORECASE)
+                    member_start = match.start(1) + dot_index + (1 if is_first_split_prefix else 0)
+                    root_end = member_start if is_first_split_prefix else match.start(1) + dot_index
+                    self.output_text.tag_add("syntax_root", f"{start_index}+{root_start}c", f"{start_index}+{root_end}c")
+                    member_tag = "syntax_asset" if is_stringref_asset else "syntax_member"
+                    self.output_text.tag_add(member_tag, f"{start_index}+{member_start}c", f"{start_index}+{match.end(1)}c")
+                else:
+                    self.output_text.tag_add("syntax_root", f"{start_index}+{match.start(1)}c", f"{start_index}+{match.end(1)}c")
+            bare_key_re = re.compile(r"^[ \t]*([A-Za-z_][A-Za-z0-9_.:-]*)\s*=", re.MULTILINE)
+            for match in bare_key_re.finditer(text):
+                key = match.group(1)
+                dot_index = key_member_split(key)
+                if dot_index > 0:
+                    root_start = match.start(1)
+                    is_first_split_prefix = key.startswith(("StartupRefs.", "StringRefs."))
+                    is_stringref_asset = key.startswith("StringRefs.") and re.search(r"\.(?:edf|prx|pvm|pwk|bsf|txt|xfg|ifc)$", key, re.IGNORECASE)
+                    member_start = match.start(1) + dot_index + (1 if is_first_split_prefix else 0)
+                    root_end = member_start if is_first_split_prefix else match.start(1) + dot_index
+                    self.output_text.tag_add("syntax_root", f"{start_index}+{root_start}c", f"{start_index}+{root_end}c")
+                    member_tag = "syntax_asset" if is_stringref_asset else "syntax_member"
+                    self.output_text.tag_add(member_tag, f"{start_index}+{member_start}c", f"{start_index}+{match.end(1)}c")
                 else:
                     self.output_text.tag_add("syntax_root", f"{start_index}+{match.start(1)}c", f"{start_index}+{match.end(1)}c")
             string_value_re = re.compile(r"^@0x[0-9A-Fa-f]+\s+string\s+[^\n=]+\s=\s(.+)$", re.MULTILINE)
@@ -8032,12 +8277,28 @@ class PipeworksGUI:
             )
             for match in named_ref_value_re.finditer(text):
                 self.output_text.tag_add("syntax_value_string", f"{start_index}+{match.start(1)}c", f"{start_index}+{match.end(1)}c")
+            asset_value_re = re.compile(
+                r"^@0x[0-9A-Fa-f]+\s+[A-Za-z0-9_\[\]xXa-fA-F]+\s+[^\n=]+\s=\s.*?"
+                r"((?:[A-Za-z0-9_./-]+[ \t]+)*[A-Za-z0-9_./-]+\.(?:edf|prx|pvm|pwk|bsf|txt|xfg|ifc))\b",
+                re.IGNORECASE | re.MULTILINE,
+            )
+            for match in asset_value_re.finditer(text):
+                self.output_text.tag_add("syntax_asset", f"{start_index}+{match.start(1)}c", f"{start_index}+{match.end(1)}c")
             compact_value_re = re.compile(
-                r"^[ \t]*(?:float|int|int_alt|string)\s+[^=\n]+=\s*(?![-+]?(?:0x[0-9A-Fa-f]+|\d+(?:\.\d*)?|\.\d+)(?:[eE][-+]?\d+)?\s*(?:#.*)?$)([^#\n]*\S)",
+                r"^[ \t]*(?:(?:float|int|int_alt|string)\s+)?[^=\n]+=\s*(?![-+]?(?:0x[0-9A-Fa-f]+|\d+(?:\.\d*)?|\.\d+)(?:[eE][-+]?\d+)?\s*(?:#.*)?$)([^#\n]*\S)",
                 re.MULTILINE,
             )
             for match in compact_value_re.finditer(text):
                 self.output_text.tag_add("syntax_value_string", f"{start_index}+{match.start(1)}c", f"{start_index}+{match.end(1)}c")
+                asset_match = re.search(
+                    r"((?:[A-Za-z0-9_./-]+[ \t]+)*[A-Za-z0-9_./-]+\.(?:edf|prx|pvm|pwk|bsf|txt|xfg|ifc))\b",
+                    match.group(1),
+                    re.IGNORECASE,
+                )
+                if asset_match:
+                    asset_start = match.start(1) + asset_match.start(1)
+                    asset_end = match.start(1) + asset_match.end(1)
+                    self.output_text.tag_add("syntax_asset", f"{start_index}+{asset_start}c", f"{start_index}+{asset_end}c")
             root_re = re.compile(r"^@?0x[0-9A-Fa-f]+\s+([^\n]+)$", re.MULTILINE)
             for match in root_re.finditer(text):
                 self.output_text.tag_add("syntax_root", f"{start_index}+{match.start(1)}c", f"{start_index}+{match.end(1)}c")
@@ -8045,11 +8306,11 @@ class PipeworksGUI:
         self.output_text.tag_raise("syntax_string")
         self.output_text.tag_raise("syntax_root")
         self.output_text.tag_raise("syntax_member")
-        self.output_text.tag_raise("syntax_asset")
         self.output_text.tag_raise("syntax_row_type")
         self.output_text.tag_raise("syntax_number")
         self.output_text.tag_raise("syntax_offset")
         self.output_text.tag_raise("syntax_value_string")
+        self.output_text.tag_raise("syntax_asset")
         self.output_text.tag_raise("root_table_header")
         self.output_text.tag_raise("find_match")
 
@@ -8144,9 +8405,7 @@ class PipeworksGUI:
 
             # Accept a directory drop or a direct bundle drop
             if os.path.isdir(filepath):
-                self.file_entry.configure(state='normal')
                 self.file_path_var.set(filepath)
-                self.file_entry.configure(state='readonly')
                 self.output_text.insert(tk.END, f"Directory loaded via drag-drop: {filepath}\n")
                 self.load_directory(filepath)
             elif os.path.isfile(filepath) and filepath.lower().endswith(SUPPORTED_BUNDLE_EXTENSIONS):
@@ -8326,9 +8585,7 @@ class PipeworksGUI:
             self._current_zip_source = filepath
             self._current_zip_bundle = bundle_path
             filepath = bundle_path
-        self.file_entry.configure(state='normal')
         self.file_path_var.set(filepath)
-        self.file_entry.configure(state='readonly')
         self.parse_file()
         self.save_last_input(original_path, "file")
 
@@ -9176,10 +9433,13 @@ class PipeworksGUI:
         temp_output = str(get_temp_dir() / f"{Path(output_path).name}.rebuild_tmp")
 
         replacement_dir = self.bundle_entry_edit["replacement_dir"]
+        self.parser._extra_string_values = list(getattr(self, "_pending_prx_string_values", []) or [])
         if self.parser.bundle_type == 'vol':
             success = self.parser.rebuild_vol(temp_output, self.parsed_files, replacement_dir)
         else:
             success = self.parser.rebuild_bdg(temp_output, self.parsed_files, replacement_dir)
+        self.parser._extra_string_values = []
+        self._pending_prx_string_values = []
 
         if success:
             backup = self.create_incremental_backup(output_path)
@@ -9362,18 +9622,25 @@ class PipeworksGUI:
         )
         return selected or None
 
-    def _parse_prx_value(self, row, value_text, strings):
+    def _prx_string_value_id(self, value, strings, new_strings=None):
+        if value in strings:
+            return strings.index(value)
+        if value.startswith("string_") and value[7:].isdigit():
+            return int(value[7:])
+        if new_strings is None:
+            return int(value, 0)
+        if value not in new_strings:
+            new_strings.append(value)
+        return len(strings) + new_strings.index(value)
+
+    def _parse_prx_value(self, row, value_text, strings, new_strings=None):
         value = value_text.strip()
         if row.type_id == PRX_VALUE_EDITOR.TYPE_FLOAT:
             return struct.unpack(">I", struct.pack(">f", float(value)))[0]
         if row.type_id in (PRX_VALUE_EDITOR.TYPE_INT, PRX_VALUE_EDITOR.TYPE_INT_ALT, PRX_VALUE_EDITOR.TYPE_FLOAT_ALT):
             return int(value, 0)
         if row.type_id == PRX_VALUE_EDITOR.TYPE_STRING:
-            if value in strings:
-                return strings.index(value)
-            if value.startswith("string_") and value[7:].isdigit():
-                return int(value[7:])
-            return int(value, 0)
+            return self._prx_string_value_id(value, strings, new_strings)
         raise ValueError(f"Refusing to import non-editable PRX row type {row.type_name}")
 
     def _strip_prx_inline_comment(self, value_text):
@@ -9388,18 +9655,14 @@ class PipeworksGUI:
             return PRX_VALUE_EDITOR.TYPE_STRING
         raise ValueError(f"Unsupported PRX row type {type_name}")
 
-    def _parse_new_prx_value(self, type_id, value_text, strings):
+    def _parse_new_prx_value(self, type_id, value_text, strings, new_strings=None):
         value = value_text.strip()
         if type_id == PRX_VALUE_EDITOR.TYPE_FLOAT:
             return struct.unpack(">I", struct.pack(">f", float(value)))[0]
         if type_id in (PRX_VALUE_EDITOR.TYPE_INT, PRX_VALUE_EDITOR.TYPE_INT_ALT, PRX_VALUE_EDITOR.TYPE_FLOAT_ALT):
             return int(value, 0)
         if type_id == PRX_VALUE_EDITOR.TYPE_STRING:
-            if value in strings:
-                return strings.index(value)
-            if value.startswith("string_") and value[7:].isdigit():
-                return int(value[7:])
-            return int(value, 0)
+            return self._prx_string_value_id(value, strings, new_strings)
         raise ValueError(f"Unsupported PRX row type 0x{type_id:08X}")
 
     def _add_named_prx_rows(self, prx, rows, strings, additions):
@@ -9637,6 +9900,7 @@ class PipeworksGUI:
             wanted_by_off = {}
             wanted_detail_by_off = {}
             additions_by_key = {}
+            new_strings = [] if self.bundle_entry_edit else None
             conflicts = []
             shared_conflicts = {}
             row_re = re.compile(r"^@0x([0-9A-Fa-f]+)\s+([a-zA-Z0-9_]+)\s+(.+?)\s+=\s+(.*)$")
@@ -9677,7 +9941,7 @@ class PipeworksGUI:
                         group, name = key.rsplit(".", 1)
                         try:
                             type_id = self._prx_type_id_for_name(type_name)
-                            value_raw = self._parse_new_prx_value(type_id, value_text, strings) & 0xFFFFFFFF
+                            value_raw = self._parse_new_prx_value(type_id, value_text, strings, new_strings) & 0xFFFFFFFF
                         except Exception as exc:
                             conflicts.append(f"{key}: {exc}")
                             continue
@@ -9700,7 +9964,7 @@ class PipeworksGUI:
                 if row.type_id not in PRX_VALUE_EDITOR.EDITABLE_TYPES:
                     continue
 
-                new_raw = self._parse_prx_value(row, value_text, strings) & 0xFFFFFFFF
+                new_raw = self._parse_prx_value(row, value_text, strings, new_strings) & 0xFFFFFFFF
                 previous = wanted_by_off.get(row.row_offset)
                 if previous is not None and previous != new_raw:
                     items = shared_conflicts.setdefault(row.row_offset, [])
@@ -9738,6 +10002,8 @@ class PipeworksGUI:
             prx = self._add_named_prx_rows(prx, rows, strings, list(additions_by_key.values()))
 
             Path(output_path).write_bytes(prx)
+            if self.bundle_entry_edit is not None:
+                self._pending_prx_string_values = list(new_strings or [])
             return True
         except Exception as exc:
             messagebox.showerror("Compile Error", f"Failed to compile PRX:\n{exc}")
@@ -9902,7 +10168,10 @@ class PipeworksGUI:
         self.setup_root_table_folds()
         self._sync_editor_diff_baseline(loaded_text)
         self.loading_text_editor = False
-        self.start_lazy_syntax_highlight()
+        if self.text_mode == "pvm":
+            self.start_visible_syntax_highlight_only()
+        else:
+            self.start_lazy_syntax_highlight()
 
     def _current_editor_text(self):
         return self.output_text.get("1.0", tk.END).rstrip("\n") + "\n"

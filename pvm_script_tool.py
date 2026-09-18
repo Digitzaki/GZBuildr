@@ -2,10 +2,9 @@
 """
 Pipeworks PWK VM module (.pvm) inspection helper.
 
-This is intentionally conservative: it identifies GC/Wii PWK VM script modules,
-parses the stable header/section table, extracts string pools and symbol-like
-names, and emits an editable-looking text report without claiming bytecode
-round-trip support yet.
+This is intentionally conservative: it parses big-endian GC/Wii PWK VM script
+modules, emits editable typed globals, and decompiles preserved bytecode into
+source-like read-only routines using semantics recovered from Godzilla3.elf.
 """
 from __future__ import annotations
 
@@ -13,6 +12,7 @@ import argparse
 import ast
 import re
 import struct
+import sys
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -114,6 +114,15 @@ class PvmInstruction:
     text: str
 
 
+@dataclass(frozen=True)
+class PvmCodeEntry:
+    index: int
+    code_offset: int
+    file_offset: int
+    end_code_offset: int
+    name: str
+
+
 PV_OPERATOR_MODES = {
     0: "binary_type_op",
     1: "binary_type_op",
@@ -123,6 +132,30 @@ PV_OPERATOR_MODES = {
     5: "noop",
     6: "binary_type_store",
     7: "noop",
+}
+
+# applyOperator's typed-comparison dispatch is proven by Godzilla3.elf. Other
+# token values are deliberately kept numeric until ParserType::applyOperator
+# can be tied back to the compiler's PPTokenTypes enum.
+PV_COMPARISON_TOKENS = {
+    0: "==",
+    1: "!=",
+    16: "<",
+    17: ">",
+    18: ">=",
+    19: "<=",
+}
+
+PVM_SECTION_NAMES = {
+    0: "Code",
+    1: "InitialValues",
+    2: "ValueSymbols",
+    3: "CodeRelocations",
+    4: "Types",
+    5: "SymbolRefs",
+    6: "StringPool",
+    7: "RuntimeRecords",
+    8: "DebugStringPool",
 }
 
 def is_pwk_vm_module(data: bytes) -> bool:
@@ -184,25 +217,34 @@ def section_data(module: PvmModule, index: int) -> bytes:
     return module.data[section.offset:section.end]
 
 
-def pvm_op_size(code: bytes, offset: int) -> int:
+def _canonical_opcode(raw_op: int, version_text: str = "") -> int:
+    op = raw_op & 0x7F
+    # v1.60 predates v1.70's second 7-byte assignment/call opcode (0x73).
+    # Its remaining tail opcodes therefore occupy 0x73..0x79 one slot lower.
+    if "v1.60" in version_text and 0x73 <= op <= 0x79:
+        return op + 1
+    return op
+
+
+def pvm_op_size(code: bytes, offset: int, version_text: str = "") -> int:
     if offset >= len(code):
         return 0
-    op = code[offset] & 0x7F
+    raw_op = code[offset] & 0x7F
+    op = _canonical_opcode(raw_op, version_text)
     if op == 0x6D:
         subtype = code[offset + 2] if offset + 2 < len(code) else 0
         return PV_6D_SUBTYPE_SIZES.get(subtype, 3)
     if op == 0x6C:
-        # The runtime aligns (ip + 4) down to a 4-byte boundary and reads a
-        # u16 record count from that aligned word. The exact formula includes
-        # the opcode value, which makes these records act like table blocks.
+        # GetPVOpSize aligns (opcode + 4) down to a 4-byte boundary, then reads
+        # the descriptor count two bytes into that aligned header.
         if offset + 5 >= len(code):
             return 1
         aligned = (offset + 4) & ~3
-        if aligned + 2 <= len(code):
-            count = int.from_bytes(code[aligned:aligned + 2], "big")
-            if count > 0:
-                return min(len(code) - offset, ((count - 1) * 8) + op + 12)
-        return 1
+        if aligned + 4 > len(code):
+            return 1
+        count = int.from_bytes(code[aligned + 2:aligned + 4], "big")
+        size = ((count - 1) * 8) + (aligned - offset) + 12
+        return size if size > 0 and offset + size <= len(code) else 1
     return PV_FIXED_OP_SIZES.get(op, 1)
 
 
@@ -212,7 +254,7 @@ def pvm_code_offsets(module: PvmModule) -> list[int]:
         return []
     count = int.from_bytes(blob[0:4], "big")
     offsets = []
-    pos = 8
+    pos = 4
     for _ in range(min(count, (len(blob) - pos) // 4)):
         value = int.from_bytes(blob[pos:pos + 4], "big")
         if 0 <= value < module.sections[0].size:
@@ -221,13 +263,53 @@ def pvm_code_offsets(module: PvmModule) -> list[int]:
     return offsets
 
 
+def pvm_routine_offsets(module: PvmModule) -> list[int]:
+    """Return actual VM routine starts discovered from frame prologues.
+
+    Opcode 0x6C creates a PVFrame and skips its aligned local descriptor table.
+    Section 3 contains code-address relocation sites, not a function directory.
+    """
+    code = section_data(module, 0)
+    return [offset for offset in _instruction_offsets(module) if (code[offset] & 0x7F) == 0x6C]
+
+
+def pvm_code_entries(module: PvmModule) -> list[PvmCodeEntry]:
+    """Return routines delimited by the VM's proven 0x6C frame prologues."""
+    offsets = pvm_routine_offsets(module)
+    code_base = module.sections[0].offset
+    sorted_unique = sorted(set(offsets))
+    next_by_offset = {
+        value: sorted_unique[index + 1] if index + 1 < len(sorted_unique) else module.sections[0].size
+        for index, value in enumerate(sorted_unique)
+    }
+    entries: list[PvmCodeEntry] = []
+    used_names: dict[str, int] = {}
+    for index, offset in enumerate(offsets):
+        safe = f"routine_{offset:06X}"
+        if safe in used_names:
+            used_names[safe] += 1
+            safe = f"{safe}_{used_names[safe]}"
+        else:
+            used_names[safe] = 0
+        entries.append(
+            PvmCodeEntry(
+                index=index,
+                code_offset=offset,
+                file_offset=code_base + offset,
+                end_code_offset=next_by_offset.get(offset, module.sections[0].size),
+                name=safe,
+            )
+        )
+    return entries
+
+
 def format_bytecode_preview(module: PvmModule, max_ops: int = 180) -> str:
     code = section_data(module, 0)
     entry_offsets = set(pvm_code_offsets(module))
     lines = []
     lines.append("[bytecode preview]")
     if entry_offsets:
-        lines.append("; section 3 code offsets: " + ", ".join(f"0x{value:04X}" for value in sorted(entry_offsets)[:64]))
+        lines.append("; section 3 code relocation sites: " + ", ".join(f"0x{value:04X}" for value in sorted(entry_offsets)[:64]))
         if len(entry_offsets) > 64:
             lines.append(f"; ... {len(entry_offsets) - 64} more")
     lines.append("; op byte is masked with 0x7F by the runtime; sizes come from GetPVOpSize where known.")
@@ -236,9 +318,9 @@ def format_bytecode_preview(module: PvmModule, max_ops: int = 180) -> str:
     ops = 0
     while offset < len(code) and ops < max_ops:
         mark = ">" if offset in entry_offsets else " "
-        size = max(1, pvm_op_size(code, offset))
+        size = max(1, pvm_op_size(code, offset, module.version_text))
         raw = code[offset:offset + size]
-        op = code[offset] & 0x7F
+        op = _canonical_opcode(code[offset], module.version_text)
         raw_display = raw.hex(" ")
         if len(raw) > 16:
             raw_display = raw[:16].hex(" ") + f" ... ({len(raw)} bytes)"
@@ -313,6 +395,22 @@ def _pool_name(index: int, symbols: list[str], debug: list[str]) -> str:
     return f"ref_{index}"
 
 
+def _member_names(module: PvmModule) -> dict[int, str]:
+    """Decode section 5's member-reference rows by module-local index."""
+    blob = section_data(module, 5)
+    strings = section_data(module, 6)
+    if len(blob) < 4:
+        return {}
+    count = int.from_bytes(blob[:4], "big")
+    names: dict[int, str] = {}
+    for index in range(min(count, (len(blob) - 4) // 8)):
+        _owner, _member_id, name_offset = struct.unpack_from(">HHI", blob, 4 + index * 8)
+        name = _cstr(strings, name_offset)
+        if name:
+            names[index] = name
+    return names
+
+
 def _code_note(value: int, code_size: int) -> str:
     if 0 <= value < code_size:
         return f"code_target={value}"
@@ -326,34 +424,24 @@ def _instruction_offsets(module: PvmModule) -> list[int]:
     valid_ops = set(PV_FIXED_OP_SIZES) | {0x6C, 0x6D}
 
     while offset < len(code):
-        op = code[offset] & 0x7F
+        op = _canonical_opcode(code[offset], module.version_text)
         if op not in valid_ops:
             offset += 1
             continue
-        size = max(1, pvm_op_size(code, offset))
+        size = max(1, pvm_op_size(code, offset, module.version_text))
         if offset + size > len(code):
             break
         offsets.append(offset)
-        if op == 0x6C and offset + 8 < len(code):
-            # 0x6C marks a frame/table header. The VM bytecode for that frame
-            # can follow the 8-byte header, but some frames contain metadata
-            # there instead. Only enter the body when it begins with a VM op.
-            body = offset + 8
-            if (code[body] & 0x7F) in valid_ops:
-                offset = body
-            else:
-                offset += size
-        else:
-            offset += size
+        offset += size
     return offsets
 
 
 def _decode_table_6c(code_offset: int, raw: bytes) -> str:
-    if len(raw) < 8:
-        return "enter_call_frame(table=bad)"
     aligned = ((code_offset + 4) & ~3) - code_offset
-    count = int.from_bytes(raw[aligned:aligned + 2], "big") if aligned + 2 <= len(raw) else 0
-    return f"enter_call_frame locals={count}"
+    if aligned + 4 > len(raw):
+        return "enter_frame descriptors=unknown"
+    count = int.from_bytes(raw[aligned + 2:aligned + 4], "big") if aligned + 4 <= len(raw) else 0
+    return f"enter_frame descriptors={count}"
 
 
 def decode_pvm_instructions(module: PvmModule) -> list[PvmInstruction]:
@@ -361,12 +449,13 @@ def decode_pvm_instructions(module: PvmModule) -> list[PvmInstruction]:
     code_base = module.sections[0].offset
     symbols = indexed_pool(module, 6)
     debug = indexed_pool(module, 8)
+    members = _member_names(module)
     entry_offsets = set(pvm_code_offsets(module))
     out: list[PvmInstruction] = []
 
     for offset in _instruction_offsets(module):
-        op = code[offset] & 0x7F
-        size = max(1, pvm_op_size(code, offset))
+        op = _canonical_opcode(code[offset], module.version_text)
+        size = max(1, pvm_op_size(code, offset, module.version_text))
         if offset + size > len(code):
             size = len(code) - offset
         raw = code[offset:offset + size]
@@ -380,13 +469,12 @@ def decode_pvm_instructions(module: PvmModule) -> list[PvmInstruction]:
         elif op == 0x66 and len(raw) >= 5:
             tag = raw[1]
             index = _u24(raw[2:5])
-            name = _pool_name(index, symbols, debug)
-            text = f"push_copy {name} ; tag={tag}, index={index}"
+            space = "global" if tag == 1 else "module_global" if tag == 0 else f"variable_space_{tag}"
+            text = f"push_copy {space}[{index}]"
         elif op == 0x67 and len(raw) >= 5:
             tag = raw[1]
             index = _u24(raw[2:5])
-            name = _pool_name(index, symbols, debug)
-            text = f"push_ref {name} ; tag={tag}, index={index}"
+            text = f"push_symbol symbol[{index}] ; tag={tag}"
         elif op == 0x68:
             text = "push_null"
         elif op == 0x69 and len(raw) >= 5:
@@ -413,7 +501,7 @@ def decode_pvm_instructions(module: PvmModule) -> list[PvmInstruction]:
             text = f"apply_operator token={token}, mode={mode}{extra}"
         elif op == 0x6E and len(raw) >= 3:
             member = int.from_bytes(raw[1:3], "big")
-            text = f"call_member pop_object.{_pool_name(member, symbols, debug)}"
+            text = f"call_member pop_object.{members.get(member, f'member_{member}')}"
         elif op == 0x6F and len(raw) >= 5:
             tag = raw[1]
             target = _u24(raw[2:5])
@@ -441,15 +529,15 @@ def decode_pvm_instructions(module: PvmModule) -> list[PvmInstruction]:
             text = f"set_local local[{local}] = stack.top"
         elif op == 0x75 and len(raw) >= 3:
             member = int.from_bytes(raw[1:3], "big")
-            text = f"call_member pop_object.{_pool_name(member, symbols, debug)}"
+            text = f"call_member pop_object.{members.get(member, f'member_{member}')}"
         elif op == 0x76:
-            text = "compare stack[-1], stack[0]"
+            text = "resolve stack[-1], stack[0]"
         elif op == 0x77:
             text = "return_value stack.top"
         elif op == 0x78:
-            text = "return"
+            text = "leave_frame"
         elif op == 0x79:
-            text = "yield"
+            text = "return_vm_state 1"
         elif op == 0x7A:
             text = "end"
 
@@ -458,13 +546,339 @@ def decode_pvm_instructions(module: PvmModule) -> list[PvmInstruction]:
 
 
 def format_pvm_code(module: PvmModule) -> str:
-    entry_offsets = set(pvm_code_offsets(module))
+    labels = {
+        target for inst in decode_pvm_instructions(module)
+        if (target := _pvm_branch_target(inst)) is not None
+    }
     lines = ["[Code]"]
     lines.append("# Decoded VM instructions. Numeric literals are decimal; loc_N labels are section-0 code offsets.")
     for inst in decode_pvm_instructions(module):
-        label = f"loc_{inst.code_offset}: " if inst.code_offset in entry_offsets else ""
+        label = f"loc_{inst.code_offset}: " if inst.code_offset in labels else ""
         lines.append(f"{label}{inst.text}")
     return "\n".join(lines)
+
+
+def format_pvm_entries(module: PvmModule) -> str:
+    lines = ["[Routines]"]
+    lines.append("Index | CodeStart | CodeEnd   | FileOffset | Name")
+    for entry in pvm_code_entries(module):
+        lines.append(
+            f"{entry.index:05d} | +0x{entry.code_offset:06X} | +0x{entry.end_code_offset:06X} | "
+            f"@0x{entry.file_offset:06X} | {entry.name}"
+        )
+    return "\n".join(lines)
+
+
+def format_pvm_entries_preview(module: PvmModule, limit: int = 96) -> str:
+    entries = pvm_code_entries(module)
+    lines = ["[Routines]"]
+    lines.append("Index | CodeStart | CodeEnd   | FileOffset | Name")
+    for entry in entries[:limit]:
+        lines.append(
+            f"{entry.index:05d} | +0x{entry.code_offset:06X} | +0x{entry.end_code_offset:06X} | "
+            f"@0x{entry.file_offset:06X} | {entry.name}"
+        )
+    if len(entries) > limit:
+        lines.append(f"# ... {len(entries) - limit} more routines hidden in this preview")
+    return "\n".join(lines)
+
+
+def _instructions_in_range(module: PvmModule, start: int, end: int) -> list[PvmInstruction]:
+    return [
+        inst for inst in decode_pvm_instructions(module)
+        if start <= inst.code_offset < end
+    ]
+
+
+def _instructions_by_routine(module: PvmModule, entries: list[PvmCodeEntry]) -> dict[int, list[PvmInstruction]]:
+    grouped = {entry.index: [] for entry in entries}
+    if not entries:
+        return grouped
+    ordered = sorted(entries, key=lambda entry: entry.code_offset)
+    entry_index = 0
+    for inst in decode_pvm_instructions(module):
+        while entry_index + 1 < len(ordered) and inst.code_offset >= ordered[entry_index].end_code_offset:
+            entry_index += 1
+        entry = ordered[entry_index]
+        if entry.code_offset <= inst.code_offset < entry.end_code_offset:
+            grouped[entry.index].append(inst)
+    return grouped
+
+
+def format_pvm_disassembly(module: PvmModule, path: Path | None = None, max_entries: int | None = None) -> str:
+    lines = []
+    lines.append("# PWK PVM disassembly")
+    if path is not None:
+        lines.append(f"# SourcePVM={path}")
+    lines.append("# Instruction sizes are from GetPVOpSize evidence; opcode names are still being recovered.")
+    lines.append("")
+    entries = pvm_code_entries(module)
+    if max_entries is not None:
+        entries = entries[:max_entries]
+    grouped = _instructions_by_routine(module, entries)
+    for entry in entries:
+        lines.append(
+            f"## entry {entry.index:05d} +0x{entry.code_offset:06X}-+0x{entry.end_code_offset:06X} {entry.name}"
+        )
+        instructions = grouped[entry.index]
+        if not instructions:
+            lines.append("  ; no decoded instructions in this range")
+        for inst in instructions:
+            raw = inst.raw.hex(" ")
+            lines.append(f"  +0x{inst.code_offset:06X}  {raw:<24} {inst.text}")
+        lines.append("")
+    return "\n".join(lines).rstrip() + "\n"
+
+
+def format_pvm_source_scaffold(module: PvmModule, path: Path | None = None, max_entries: int | None = 80) -> str:
+    """Emit conservative source-like code recovered from VM stack operations."""
+    lines = []
+    lines.append("# PWK PVM decompiler output")
+    if path is not None:
+        lines.append(f"# SourcePVM={path}")
+    lines.append("# Control flow and frame boundaries come from the Wii runtime in Godzilla3.elf.")
+    lines.append("# This is readable pseudocode, not the original Pipeworks source syntax.")
+    lines.append("# Code is read-only; compile support remains limited to proven typed globals.")
+    lines.append("")
+
+    type_values = extract_typed_values(module)
+    if type_values:
+        lines.append("globals")
+        lines.append("{")
+        for item in type_values:
+            value = repr(item.value) if isinstance(item.value, str) else repr(item.value) if isinstance(item.value, float) else str(item.value)
+            lines.append(f"    {item.type_name} {item.name} = {value};")
+        lines.append("}")
+        lines.append("")
+
+    entries = pvm_code_entries(module)
+    if max_entries is not None:
+        entries = entries[:max_entries]
+    for entry in entries:
+        lines.append(f"function {entry.name}()")
+        lines.append("{")
+        instructions = _instructions_in_range(module, entry.code_offset, entry.end_code_offset)
+        if not instructions:
+            lines.append("    // empty")
+        else:
+            lines.extend(_decompile_routine(instructions))
+        lines.append("}")
+        lines.append("")
+    if max_entries is not None and len(pvm_code_entries(module)) > max_entries:
+        lines.append(f"# ... {len(pvm_code_entries(module)) - max_entries} more routines omitted from this preview")
+    return "\n".join(lines).rstrip() + "\n"
+
+
+def _pvm_branch_target(inst: PvmInstruction) -> int | None:
+    if inst.op in (0x6F, 0x70, 0x71) and len(inst.raw) >= 5:
+        return _u24(inst.raw[2:5])
+    return None
+
+
+def _decompile_routine(instructions: list[PvmInstruction]) -> list[str]:
+    """Lift one VM routine into cautious stack pseudocode.
+
+    The stack is reset at control-flow joins. That loses some expressions, but
+    avoids inventing values when two predecessor blocks have different stacks.
+    """
+    labels = {
+        target for inst in instructions
+        if (target := _pvm_branch_target(inst)) is not None
+    }
+    stack: list[str] = []
+    lines: list[str] = []
+
+    def push(value: str) -> None:
+        stack.append(value)
+
+    def pop(default: str = "stack_value") -> str:
+        return stack.pop() if stack else default
+
+    for inst in instructions:
+        if inst.code_offset in labels:
+            stack.clear()
+            lines.append(f"loc_{inst.code_offset:06X}:")
+        raw = inst.raw
+        op = inst.op
+        note = f" // +0x{inst.code_offset:06X}"
+
+        if op == 0x6C:
+            lines.append(f"    frame {inst.text.split('=', 1)[-1]};{note}")
+        elif op == 0x64 and len(raw) >= 3:
+            push(f"local_{int.from_bytes(raw[1:3], 'big'):04X}")
+        elif op == 0x65 and len(raw) >= 2:
+            index = len(stack) - 1 - raw[1]
+            push(stack[index] if 0 <= index < len(stack) else f"stack_relative_{raw[1]}")
+        elif op in (0x66, 0x67) and len(raw) >= 5:
+            index = _u24(raw[2:5])
+            # decode_pvm_instructions has already resolved this reference using
+            # the module pools; retain that proven display name here.
+            decoded = inst.text.split(" ;", 1)[0].split(" ", 1)[1]
+            push(decoded)
+        elif op == 0x68:
+            push("null")
+        elif op == 0x69 and len(raw) >= 5:
+            push(f"code_ptr(loc_{_u24(raw[2:5]):06X})")
+        elif op == 0x6A and len(raw) >= 5:
+            push(str(_u24(raw[2:5])))
+        elif op == 0x6B and len(raw) >= 2:
+            for _ in range(min(raw[1], len(stack))):
+                stack.pop()
+        elif op == 0x6D and len(raw) >= 3:
+            token, mode = raw[1], raw[2]
+            if mode in (0, 1):
+                right, left = pop(), pop()
+                push(f"op_{token}({left}, {right})")
+            elif mode == 2:
+                push(f"truth({pop()})")
+            elif mode == 3:
+                value, destination = pop(), pop()
+                lines.append(f"    {destination} = {value};{note}")
+                push(destination)
+            elif mode == 4:
+                right, left = pop(), pop()
+                destination = pop("comparison_result")
+                operator = PV_COMPARISON_TOKENS.get(token, f"compare_{token}")
+                push(f"({left} {operator} {right})" if token in PV_COMPARISON_TOKENS else f"{operator}({left}, {right})")
+            elif mode == 6:
+                right, left = pop(), pop()
+                destination = pop("operator_result")
+                push(f"op_{token}({left}, {right})")
+            elif mode not in (5, 7):
+                lines.append(f"    apply_operator(token={token}, mode={mode});{note}")
+        elif op in (0x6E, 0x75) and len(raw) >= 3:
+            member = inst.text.split(".", 1)[-1]
+            receiver = pop("object")
+            result = f"{receiver}.{member}()"
+            lines.append(f"    {result};{note}")
+            push(result)
+        elif op in (0x6F, 0x70):
+            target = _pvm_branch_target(inst)
+            condition = pop("condition")
+            if op == 0x70:
+                condition = f"!({condition})"
+            lines.append(f"    if ({condition}) goto loc_{target:06X};{note}")
+            stack.clear()
+        elif op == 0x71:
+            target = _pvm_branch_target(inst)
+            lines.append(f"    goto loc_{target:06X};{note}")
+            stack.clear()
+        elif op in (0x72, 0x73) and len(raw) >= 7:
+            target = _u24(raw[2:5])
+            local = int.from_bytes(raw[5:7], "big")
+            value = pop()
+            call_kind = "call" if op == 0x72 else "call_virtual"
+            lines.append(f"    local_{local:04X} = {call_kind}(loc_{target:06X}, {value});{note}")
+            push(f"local_{local:04X}")
+        elif op == 0x74 and len(raw) >= 3:
+            local = int.from_bytes(raw[1:3], "big")
+            value = pop()
+            lines.append(f"    local_{local:04X} = {value};{note}")
+            push(f"local_{local:04X}")
+        elif op == 0x76:
+            right, left = pop(), pop()
+            push(f"resolve({left}, {right})")
+        elif op == 0x77:
+            lines.append(f"    return {pop()};{note}")
+            stack.clear()
+        elif op == 0x78:
+            lines.append(f"    return;{note}")
+            stack.clear()
+        elif op == 0x79:
+            lines.append(f"    return_vm_state(1);{note}")
+            stack.clear()
+        elif op == 0x7A:
+            lines.append(f"    end_marker;{note}")
+        else:
+            lines.append(f"    {inst.text};{note}")
+    return lines
+
+
+def _pvm_source_identifier(name: str) -> str:
+    ident = re.sub(r"[^A-Za-z0-9_]", "_", name).strip("_")
+    if not ident:
+        ident = "value"
+    if not re.match(r"^[A-Za-z_]", ident):
+        ident = "_" + ident
+    return ident
+
+
+def _pvm_source_aliases(values: list[PvmTypedValue]) -> dict[int, str]:
+    base_counts: dict[str, int] = {}
+    for item in values:
+        base = _pvm_source_identifier(item.name)
+        base_counts[base] = base_counts.get(base, 0) + 1
+
+    seen: dict[str, int] = {}
+    aliases: dict[int, str] = {}
+    for item in values:
+        base = _pvm_source_identifier(item.name)
+        if base_counts[base] == 1:
+            aliases[item.entry_index] = base
+            continue
+        seen[base] = seen.get(base, 0) + 1
+        aliases[item.entry_index] = f"{base}_{seen[base]:03d}"
+    return aliases
+
+
+def _format_pvm_source_value(value: int | float | str) -> str:
+    if isinstance(value, str):
+        return repr(value)
+    if isinstance(value, float):
+        return repr(value)
+    return str(value)
+
+
+def format_pvm_globals_source(module: PvmModule, path: Path | None = None) -> str:
+    """Emit the normal GUI-editable PVM view.
+
+    This is source-like on purpose, but still limited to proven section-1
+    typed globals. Bytecode/function decompilation stays in explicit diagnostic
+    commands until the VM is recovered well enough to round-trip real code.
+    """
+    typed_values = extract_typed_values(module)
+    aliases = _pvm_source_aliases(typed_values)
+    module_name = _pvm_source_identifier(path.stem if path is not None else "PVM_Module")
+
+    lines = []
+    lines.append("# PVM source workbench export")
+    if path is not None:
+        lines.append(f"# SourcePVM={path}")
+    lines.append(f"# PVM={path.name if path is not None else ''}")
+    lines.append(f"# Version={module.version_text}")
+    lines.append("# Editable: typed globals/initial values. Decompiled routines are read-only.")
+    lines.append("# Routine boundaries/control flow come from the Wii VM runtime; unknown tokens stay numeric.")
+    lines.append("")
+    lines.append(f"module {module_name}")
+    lines.append("{")
+    lines.append("    globals")
+    lines.append("    {")
+    if typed_values:
+        for item in typed_values:
+            alias = aliases[item.entry_index]
+            value = _format_pvm_source_value(item.value)
+            lines.append(
+                f"        {item.type_name} {alias} = {value}; "
+                f"// @0x{item.file_offset:06X} entry={item.entry_index}"
+            )
+    else:
+        lines.append("        // No typed globals were recovered from section 1.")
+    lines.append("    }")
+    lines.append("")
+    lines.append("    code")
+    lines.append("    {")
+    entries = pvm_code_entries(module)
+    grouped = _instructions_by_routine(module, entries)
+    for entry in entries:
+        lines.append(f"        function {entry.name}()")
+        lines.append("        {")
+        for source_line in _decompile_routine(grouped[entry.index]):
+            lines.append("    " + source_line)
+        lines.append("        }")
+        lines.append("")
+    lines.append("    }")
+    lines.append("}")
+    return "\n".join(lines).rstrip() + "\n"
 
 
 def extract_editable_values(module: PvmModule) -> list[PvmEditableValue]:
@@ -481,8 +895,8 @@ def extract_editable_values(module: PvmModule) -> list[PvmEditableValue]:
     out: list[PvmEditableValue] = []
 
     for offset in _instruction_offsets(module):
-        op = code[offset] & 0x7F
-        size = pvm_op_size(code, offset)
+        op = _canonical_opcode(code[offset], module.version_text)
+        size = pvm_op_size(code, offset, module.version_text)
         if size <= 1 or offset + size > len(code):
             continue
         raw = code[offset:offset + size]
@@ -795,8 +1209,11 @@ def _format_pvm_diagnostics(module: PvmModule) -> str:
         lines.append(f"; section {index}, {len(values)} string(s)")
         for offset, text in values:
             escaped = text.replace("\\", "\\\\").replace("\n", "\\n")
-        lines.append(f"@0x{offset:06X} {escaped}")
+            lines.append(f"@0x{offset:06X} {escaped}")
         lines.append("")
+
+    lines.append(format_pvm_entries(module))
+    lines.append("")
 
     lines.append(format_pvm_code(module))
     lines.append("")
@@ -826,8 +1243,9 @@ def format_pvm_report(module: PvmModule, path: Path | None = None, include_table
     if include_tables:
         lines.append("[Sections]")
         for section in module.sections:
+            section_name = PVM_SECTION_NAMES.get(section.index, f"Section{section.index}")
             lines.append(
-                f"{section.index}: offset=0x{section.offset:06X} "
+                f"{section.index} {section_name}: offset=0x{section.offset:06X} "
                 f"size=0x{section.size:06X} end=0x{section.end:06X}"
             )
         lines.append("")
@@ -837,8 +1255,12 @@ def format_pvm_report(module: PvmModule, path: Path | None = None, include_table
     return "\n".join(lines).rstrip() + "\n"
 
 
+def format_pvm_editor_view(module: PvmModule, path: Path | None = None) -> str:
+    return format_pvm_globals_source(module, path)
+
+
 def pvm_to_editable(data: bytes, path: Path | None = None) -> str:
-    return format_pvm_report(parse_pvm(data), path)
+    return format_pvm_editor_view(parse_pvm(data), path)
 
 
 def _parse_int_value(text: str) -> int:
@@ -894,8 +1316,10 @@ def _append_pvm_string(data: bytearray, module: PvmModule, value: str) -> int:
     encoded = value.encode("latin-1")
     string_section = module.sections[6]
     insert_at = string_section.end
-    string_offset = string_section.size
-    payload = encoded + b"\0"
+    pool = section_data(module, 6)
+    prefix = b"" if not pool or pool[-1] == 0 else b"\0"
+    string_offset = string_section.size + len(prefix)
+    payload = prefix + encoded + b"\0"
     data[insert_at:insert_at] = payload
     delta = len(payload)
     struct.pack_into(">I", data, 0x34, len(data))
@@ -926,6 +1350,12 @@ def editable_to_pvm(text: str, original_data: bytes) -> bytes:
         raise ValueError("Original data is not a PWK VM PVM.")
     module = parse_pvm(bytes(data))
     typed_allowed, allowed = _editable_maps(module)
+    typed_values = extract_typed_values(module)
+    typed_aliases = _pvm_source_aliases(typed_values)
+    typed_by_source = {
+        (item.type_name, typed_aliases[item.entry_index]): item
+        for item in typed_values
+    }
     old_row_re = re.compile(
         r"^@0x([0-9A-Fa-f]+)\s+.*?\bkind=(u8|u16|u24)\b.*?\bvalue=([+-]?(?:0x[0-9A-Fa-f]+|\d+))"
     )
@@ -935,25 +1365,34 @@ def editable_to_pvm(text: str, original_data: bytes) -> bytes:
     table_row_re = re.compile(
         r"^@0x([0-9A-Fa-f]+)\s*\|\s*([A-Za-z0-9_]+)\s*\|\s*.+?\s*\|\s*(.+?)\s*$"
     )
-    editable_lines: list[re.Match[str]] = []
+    source_global_re = re.compile(
+        r"^\s*(int|float|string)\s+([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(.+?)\s*;\s*(?://.*|#.*)?$"
+    )
+    editable_lines: list[tuple[int, str, str]] = []
     for line in text.splitlines():
         stripped = line.strip()
         match = old_row_re.match(stripped) or new_row_re.match(stripped) or table_row_re.match(stripped)
         if match:
-            editable_lines.append(match)
-    editable_lines.sort(key=lambda item: int(item.group(1), 16))
+            editable_lines.append((int(match.group(1), 16), match.group(2), match.group(3)))
+            continue
+        source_match = source_global_re.match(stripped)
+        if source_match:
+            kind = source_match.group(1)
+            name = source_match.group(2)
+            item = typed_by_source.get((kind, name))
+            if item is not None:
+                editable_lines.append((item.file_offset, kind, source_match.group(3)))
+    editable_lines.sort(key=lambda item: item[0])
 
     patched = 0
     string_insert_threshold = module.sections[6].end
     inserted_string_bytes = 0
-    for match in editable_lines:
-        original_file_offset = int(match.group(1), 16)
+    for original_file_offset, kind, value_text in editable_lines:
         file_offset = original_file_offset + (inserted_string_bytes if original_file_offset >= string_insert_threshold else 0)
-        kind = match.group(2)
         typed_item = typed_allowed.get((file_offset, kind))
         if typed_item is not None:
             if kind == "string":
-                string_patch_value = _parse_string_edit_value(match.group(3))
+                string_patch_value = _parse_string_edit_value(value_text)
                 pool = section_data(module, 6)
                 existing_offset = next(
                     (offset for offset, text_value in extract_null_strings(pool, 0) if text_value == string_patch_value),
@@ -989,7 +1428,7 @@ def editable_to_pvm(text: str, original_data: bytes) -> bytes:
                 raw_value = _parse_typed_raw(
                     module,
                     kind,
-                    match.group(3),
+                    value_text,
                     original_value=typed_item.value,
                     original_raw=typed_item.raw_value,
                 )
@@ -1001,7 +1440,7 @@ def editable_to_pvm(text: str, original_data: bytes) -> bytes:
                 patched += 1
             continue
 
-        value = _parse_int_value(match.group(3))
+        value = _parse_int_value(value_text)
         if kind == "int":
             kind = next((candidate.kind for candidate in allowed.values() if candidate.file_offset == file_offset), kind)
         item = allowed.get((file_offset, kind))
@@ -1032,14 +1471,170 @@ def dump_pvm(path: Path, out: Path | None = None, include_tables: bool = False) 
     return out
 
 
+def format_pvm_info(module: PvmModule, path: Path | None = None) -> str:
+    lines = []
+    lines.append("# PWK PVM module info")
+    if path is not None:
+        lines.append(f"# SourcePVM={path}")
+    lines.append(f"Version: {module.version_text}")
+    lines.append(f"Marker: 0x{module.marker:08X}")
+    lines.append(f"TotalSize: 0x{module.total_size:X}")
+    lines.append("")
+    lines.append("[Sections]")
+    for section in module.sections:
+        section_name = PVM_SECTION_NAMES.get(section.index, f"Section{section.index}")
+        lines.append(
+            f"{section.index} {section_name:<16} offset=0x{section.offset:06X} "
+            f"size=0x{section.size:06X} end=0x{section.end:06X}"
+        )
+    lines.append("")
+    lines.append(f"Code entries: {len(pvm_code_entries(module))}")
+    lines.append(f"Typed values: {len(extract_typed_values(module))}")
+    lines.append(f"Section 6 strings: {len(indexed_pool(module, 6))}")
+    lines.append(f"Section 8 debug strings: {len(indexed_pool(module, 8))}")
+    return "\n".join(lines) + "\n"
+
+
+def verify_pvm_modules(original_data: bytes, rebuilt_data: bytes) -> tuple[bool, str]:
+    lines = ["# PWK PVM structural verify"]
+    try:
+        original = parse_pvm(original_data)
+        rebuilt = parse_pvm(rebuilt_data)
+    except Exception as exc:
+        return False, "\n".join(lines + [f"Parse failure: {exc}"]) + "\n"
+
+    ok = True
+    if original_data == rebuilt_data:
+        lines.append("Bytes: identical")
+    else:
+        ok = False
+        lines.append("Bytes: different")
+        first_diff = next(
+            (index for index, pair in enumerate(zip(original_data, rebuilt_data)) if pair[0] != pair[1]),
+            min(len(original_data), len(rebuilt_data)),
+        )
+        lines.append(f"FirstDiff: 0x{first_diff:06X}")
+
+    if original.version_text != rebuilt.version_text:
+        ok = False
+        lines.append(f"Version differs: {original.version_text!r} != {rebuilt.version_text!r}")
+    if original.marker != rebuilt.marker:
+        ok = False
+        lines.append(f"Marker differs: 0x{original.marker:08X} != 0x{rebuilt.marker:08X}")
+    if original.total_size != rebuilt.total_size:
+        ok = False
+        lines.append(f"Total size differs: 0x{original.total_size:X} != 0x{rebuilt.total_size:X}")
+
+    lines.append("")
+    lines.append("[Section comparison]")
+    for left, right in zip(original.sections, rebuilt.sections):
+        same_range = left.offset == right.offset and left.size == right.size
+        same_bytes = section_data(original, left.index) == section_data(rebuilt, right.index)
+        if not (same_range and same_bytes):
+            ok = False
+        status = "OK" if same_range and same_bytes else "DIFF"
+        section_name = PVM_SECTION_NAMES.get(left.index, f"Section{left.index}")
+        lines.append(
+            f"{status} {left.index} {section_name}: "
+            f"orig=0x{left.offset:06X}+0x{left.size:06X} "
+            f"new=0x{right.offset:06X}+0x{right.size:06X} "
+            f"bytes={'same' if same_bytes else 'different'}"
+        )
+
+    lines.append("")
+    lines.append("[Semantic counts]")
+    comparisons = [
+        ("Code entries", len(pvm_code_entries(original)), len(pvm_code_entries(rebuilt))),
+        ("Typed values", len(extract_typed_values(original)), len(extract_typed_values(rebuilt))),
+        ("Section 6 strings", len(indexed_pool(original, 6)), len(indexed_pool(rebuilt, 6))),
+        ("Section 8 debug strings", len(indexed_pool(original, 8)), len(indexed_pool(rebuilt, 8))),
+        ("Decoded instructions", len(decode_pvm_instructions(original)), len(decode_pvm_instructions(rebuilt))),
+    ]
+    for label, left_count, right_count in comparisons:
+        if left_count != right_count:
+            ok = False
+        lines.append(f"{'OK' if left_count == right_count else 'DIFF'} {label}: {left_count} -> {right_count}")
+
+    return ok, "\n".join(lines) + "\n"
+
+
+def _write_or_print(text: str, output: Path | None) -> None:
+    if output is None:
+        print(text, end="")
+    else:
+        output.write_text(text, encoding="utf-8", newline="\n")
+        print(f"Wrote: {output}")
+
+
 def main(argv=None):
-    parser = argparse.ArgumentParser(description="Inspect Pipeworks PWK VM .pvm script modules")
-    parser.add_argument("input", type=Path)
-    parser.add_argument("-o", "--output", type=Path)
-    parser.add_argument("--verbose", action="store_true", help="append symbol pools and bytecode diagnostics")
+    if argv is None:
+        argv = sys.argv[1:]
+    commands = {"info", "dump", "disasm", "decompile", "compile", "verify"}
+    if argv and argv[0] not in commands and not argv[0].startswith("-"):
+        legacy = argparse.ArgumentParser(description="Inspect Pipeworks PWK VM .pvm script modules")
+        legacy.add_argument("input", type=Path)
+        legacy.add_argument("-o", "--output", type=Path)
+        legacy.add_argument("--verbose", action="store_true", help="append symbol pools and bytecode diagnostics")
+        args = legacy.parse_args(argv)
+        made = dump_pvm(args.input, args.output, include_tables=args.verbose)
+        print(f"Wrote PVM report: {made}")
+        return
+
+    parser = argparse.ArgumentParser(description="Inspect/decompile Pipeworks PWK VM .pvm script modules")
+    subparsers = parser.add_subparsers(dest="command")
+
+    info_parser = subparsers.add_parser("info", help="print parsed module header/section summary")
+    info_parser.add_argument("input", type=Path)
+    info_parser.add_argument("-o", "--output", type=Path)
+
+    dump_parser = subparsers.add_parser("dump", help="write editable value rows plus optional diagnostics")
+    dump_parser.add_argument("input", type=Path)
+    dump_parser.add_argument("-o", "--output", type=Path)
+    dump_parser.add_argument("--verbose", action="store_true", help="append symbol pools and bytecode diagnostics")
+
+    disasm_parser = subparsers.add_parser("disasm", help="write decoded instruction entries")
+    disasm_parser.add_argument("input", type=Path)
+    disasm_parser.add_argument("-o", "--output", type=Path)
+    disasm_parser.add_argument("--max-entries", type=int)
+
+    decompile_parser = subparsers.add_parser("decompile", help="write source-like decompiled VM routines")
+    decompile_parser.add_argument("input", type=Path)
+    decompile_parser.add_argument("-o", "--output", type=Path)
+    decompile_parser.add_argument("--max-entries", type=int, default=80)
+
+    compile_parser = subparsers.add_parser("compile", help="apply editable @ rows to a base PVM")
+    compile_parser.add_argument("input", type=Path, help="editable PVM text produced by dump/GZBuildr")
+    compile_parser.add_argument("-b", "--base", type=Path, required=True, help="original/base PVM to patch")
+    compile_parser.add_argument("-o", "--output", type=Path, required=True)
+
+    verify_parser = subparsers.add_parser("verify", help="structurally compare two PVM files")
+    verify_parser.add_argument("original", type=Path)
+    verify_parser.add_argument("rebuilt", type=Path)
+    verify_parser.add_argument("-o", "--output", type=Path)
+
     args = parser.parse_args(argv)
-    made = dump_pvm(args.input, args.output, include_tables=args.verbose)
-    print(f"Wrote PVM report: {made}")
+    if args.command == "info":
+        _write_or_print(format_pvm_info(load_pvm(args.input), args.input), args.output)
+    elif args.command == "dump":
+        made = dump_pvm(args.input, args.output, include_tables=args.verbose)
+        print(f"Wrote PVM report: {made}")
+    elif args.command == "disasm":
+        module = load_pvm(args.input)
+        _write_or_print(format_pvm_disassembly(module, args.input, args.max_entries), args.output)
+    elif args.command == "decompile":
+        module = load_pvm(args.input)
+        _write_or_print(format_pvm_source_scaffold(module, args.input, args.max_entries), args.output)
+    elif args.command == "compile":
+        rebuilt = editable_to_pvm(args.input.read_text(encoding="utf-8"), args.base.read_bytes())
+        args.output.write_bytes(rebuilt)
+        print(f"Wrote PVM: {args.output}")
+    elif args.command == "verify":
+        ok, text = verify_pvm_modules(args.original.read_bytes(), args.rebuilt.read_bytes())
+        _write_or_print(text, args.output)
+        raise SystemExit(0 if ok else 1)
+    else:
+        parser.print_help()
+        raise SystemExit(2)
 
 
 if __name__ == "__main__":
