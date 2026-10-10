@@ -3,8 +3,6 @@
 A GUI tool for parsing, extracting, and rebuilding Wii/GameCube/PS2 bundle files used in Pipeworks games.
 
 ## 
-## Download the latest release here: [GZBuildr 3.0.2!!](https://github.com/Digitzaki/GZBuildr/releases/tag/GZ_3.0.2)
-
 
 ## Supported Formats
 
@@ -23,7 +21,7 @@ A GUI tool for parsing, extracting, and rebuilding Wii/GameCube/PS2 bundle files
 - **.ZIP** - ZIP archives containing any of the above formats
 
 ## Requirements (Source Installation)
-Download Executable Version (No Requirements): [GZBuildr 3.0.2!!](https://github.com/Digitzaki/GZBuildr/releases/tag/GZ_3.0.2)
+Download Executable Version (No Requirements): [GZBuildr 3.5.0!!](https://github.com/Digitzaki/GZBuildr/releases/tag/GZ_3.5.0)
 ### Python
 - Python 3.x
 - tkinter (usually included with Python)
