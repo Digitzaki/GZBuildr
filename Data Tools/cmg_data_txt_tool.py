@@ -69,7 +69,7 @@ CORE_FIELDS: dict[int, tuple[str, str]] = {
     0x0CC: ("float", "CoreTuning.MidRange"),
     0x0D0: ("float", "CoreTuning.LongRange"),
     0x0D4: ("float", "CoreTuning.ProjectileRange"),
-    0x0D8: ("float", "CoreTuning.SpecialRange"),
+    0x0D8: ("float", "CoreTuning.BeamChargeRate"),
     0x0DC: ("float", "CoreTuning.CollisionRadius"),
     0x148: ("string", "Resources.Skeleton"),
     0x14C: ("string", "Resources.MeshFile"),
@@ -81,29 +81,65 @@ ACTION_RECORD_FIELDS: list[tuple[int, str, str]] = [
     (0x00, "string", "Animation"),
     (0x04, "string", "State"),
     (0x08, "float", "AnimRate"),
-    (0x0C, "float", "InputClass"),
-    (0x10, "float", "ReactionLevel"),
-    (0x14, "float", "DamageScale"),
-    (0x18, "float", "HitDirectionX"),
-    (0x1C, "float", "HitDirectionZ"),
-    (0x20, "float", "FacingDirectionX"),
-    (0x24, "float", "FacingDirectionZ"),
-    (0x28, "float", "RootMotionX"),
-    (0x2C, "float", "RootMotionZ"),
-    (0x30, "u16x2", "InputButtonMask"),
-    (0x34, "ref", "FollowupActionRef"),
-    (0x38, "string", "ActionFamily"),
-    (0x3C, "string", "Cue"),
-    (0x40, "float", "StartFrame"),
-    (0x44, "float", "ActiveFrame"),
-    (0x48, "float", "RecoveryFrame"),
-    (0x4C, "float", "CancelFrame"),
-    (0x50, "float", "Priority"),
-    (0x54, "float", "ComboWindow"),
-    (0x58, "float", "RushWindow"),
-    (0x5C, "float", "EnergyCost"),
-    (0x60, "float", "ResourceFlags"),
+    (0x0C, "float", "TurnSpeed"),
+    (0x10, "float", "Acceleration"),
+    (0x14, "float", "FacingSnapSpeed"),
+    (0x18, "float", "TransitionControl"),
+    (0x1C, "float", "TransitionSpeed"),
+    (0x20, "float", "ElevationControl"),
+    (0x24, "float", "TerrainConformScale"),
+    (0x28, "float", "DimensionShiftX"),
+    (0x2C, "float", "DimensionShiftZ"),
+    (0x30, "u16x2", "MoveEventCountFirstIndex"),
+    (0x34, "ref", "LinkedActionRef"),
+    (0x38, "int", "ActionIndex"),
+    (0x3C, "int", "ActionFlags"),
+    (0x40, "float", "AIScoreDistance"),
+    (0x44, "float", "AIScoreHeight"),
+    (0x48, "float", "AIScoreRange"),
+    (0x4C, "float", "AIScoreWeight"),
+    (0x50, "float", "AIScoreDirectionX"),
+    (0x54, "float", "AIScoreDirectionZ"),
+    (0x58, "float", "AIScoreFacing"),
+    (0x5C, "u8x4", "AIControlFlags"),
+    (0x60, "int", "AICategory"),
 ]
+
+GC_MOVE_EVENT_TYPE_NAMES = {
+    0: "AttackProperty",
+    2: "FootStep",
+    6: "Sound",
+    8: "Deactivate",
+    9: "ActionState",
+    11: "FloatParameter",
+    13: "PlayEventSound",
+    17: "BodyContact",
+    27: "MovementParameter",
+}
+
+# Xbox DAMM uses the GameCube 0x50-byte record after a larger header.
+MONSTER_WEAPON_FIELDS: tuple[tuple[int, str, str], ...] = (
+    (0x00, "int", "WeaponType"),
+    (0x04, "int", "WeaponFlags"),
+    (0x08, "string", "Name"),
+    (0x0C, "string", "Resource0"),
+    (0x10, "string", "Resource1"),
+    (0x14, "string", "Resource2"),
+    (0x18, "string", "Resource3"),
+    (0x1C, "float", "Damage"),
+    (0x20, "float", "Value0x20"),
+    (0x24, "int", "Flags0x24"),
+    (0x28, "float", "Range"),
+    (0x2C, "float", "Value0x2C"),
+    (0x30, "float", "Scale0x30"),
+    (0x34, "int", "AttachmentNodeIndex"),
+    (0x38, "int", "AttachmentNodeCount"),
+    (0x3C, "int", "Flags0x3C"),
+    (0x40, "string", "ActionName"),
+    (0x44, "int", "ActionIndex"),
+    (0x48, "int", "Value0x48"),
+    (0x4C, "int", "Value0x4C"),
+)
 
 
 def load_light_bdg():
@@ -357,6 +393,10 @@ def export_txt(bundle_path: Path, out_path: Path) -> None:
     base, size = character_data_span(character_data)
 
     action_starts = scan_action_records(data, strings, base, size)
+    action_names = {
+        rel: action_record_name(data, strings, base, rel, size) or f"Action0x{rel:06X}"
+        for rel in action_starts
+    }
     labels: dict[int, tuple[str, str]] = {}
     for rel, spec in CORE_FIELDS.items():
         if rel + 4 <= size:
@@ -369,14 +409,205 @@ def export_txt(bundle_path: Path, out_path: Path) -> None:
         for field_rel, kind, field_name in ACTION_RECORD_FIELDS:
             labels[rel + field_rel] = (kind, f"ActionRecord.{record_name}.{field_name}")
 
-    occupied = set(labels)
+    event_count = u32(data, base + 0x16C) if size >= 0x178 else 0
+    event_base = u32(data, base + 0x170) if size >= 0x178 else 0
+    event_offsets = u32(data, base + 0x174) if size >= 0x178 else 0
+    event_action_names: dict[int, str] = {}
+    if 0 < event_count < 0x10000:
+        for action_rel in action_starts:
+            packed = u32(data, base + action_rel + 0x30)
+            count = (packed >> 16) & 0xFFFF
+            first = packed & 0xFFFF
+            for event_index in range(first, min(first + count, event_count)):
+                event_action_names.setdefault(event_index, action_names[action_rel])
+    valid_events = (
+        0 < event_count < 0x10000
+        and event_offsets % 2 == 0
+        and event_base % 4 == 0
+        and 0 < event_offsets < event_base < size
+        and event_offsets + event_count * 2 <= event_base
+    )
+    event_roots: list[tuple[int, str]] = []
+    reserved_offsets: set[int] = set()
+    if valid_events:
+        reserved_offsets.update(range(event_offsets, event_base, 4))
+        for event_index in range(event_count):
+            start_offset = struct.unpack_from(">H", data, base + event_offsets + event_index * 2)[0]
+            start = event_base + start_offset
+            if event_index + 1 < event_count:
+                end_offset = struct.unpack_from(">H", data, base + event_offsets + (event_index + 1) * 2)[0]
+                end = event_base + end_offset
+            else:
+                lookup_start = u32(data, base + 0x184) if size >= 0x188 else size
+                end = lookup_start if start < lookup_start <= size else size
+            if not (event_base <= start < end <= size) or end - start < 4:
+                continue
+            reserved_offsets.update(range(start, end, 4))
+            event_type = u32(data, base + start)
+            if event_type >= 0x100:
+                continue
+            type_name = GC_MOVE_EVENT_TYPE_NAMES.get(event_type, f"Type{event_type:02d}")
+            action_name = event_action_names.get(event_index, f"Index{event_index:04d}")
+            stem = f"MoveEvent.{action_name}.Event{event_index:04d}_{type_name}"
+            event_roots.append((start, stem))
+            labels[start] = ("int", f"{stem}.Type")
+            if start + 8 <= end:
+                labels[start + 4] = ("float", f"{stem}.EventTime")
+            if event_type == 0 and end - start >= 0x28:
+                attack_fields = (
+                    (0x08, "u16x2", "ScopeFlags"),
+                    (0x0C, "int", "AttackProfile"),
+                    (0x10, "u16x2", "KnockbackModeFlags"),
+                    (0x14, "int", "ReactionMode"),
+                    (0x18, "float", "Damage"),
+                    (0x1C, "int", "LaunchProfile"),
+                    (0x20, "int", "AttackProperty"),
+                    (0x24, "u16x2", "BehaviorFlags"),
+                )
+                for field_rel, kind, field_name in attack_fields:
+                    labels[start + field_rel] = (kind, f"{stem}.{field_name}")
+
+    lookup_roots: list[tuple[int, str]] = []
+    extra_roots: dict[str, list[tuple[int, str]]] = {}
+
+    def structural_kind(rel: int) -> str:
+        raw = u32(data, base + rel)
+        if is_probable_string_id(strings, raw):
+            return "string"
+        if raw and raw % 4 == 0 and raw < size:
+            return "ref"
+        value = f32(data, base + rel)
+        if math.isfinite(value) and 1.0e-6 <= abs(value) <= 100000.0:
+            return "float"
+        return "int"
+
+    def annotate_fixed_records(
+        table: str, start: int, count: int, stride: int, *, named: bool = False
+    ) -> None:
+        roots = extra_roots.setdefault(table, [])
+        for index in range(count):
+            record = start + index * stride
+            record_name = string_value(strings, u32(data, base + record)) if named else ""
+            suffix = clean_label(record_name) if record_name and not record_name.isdigit() else f"Record{index:03d}"
+            stem = f"{table}.{suffix}"
+            roots.append((record, stem))
+            for field in range(0, stride, 4):
+                rel = record + field
+                field_name = "Name" if named and field == 0 and is_probable_string_id(strings, u32(data, base + rel)) else f"Field0x{field:02X}"
+                labels[rel] = (structural_kind(rel), f"{stem}.{field_name}")
+    lookup_tables = (
+        ("BodyPartLookup", 0x180, 0x184, 0x188),
+        ("HitLocationLookup", 0x18C, 0x190, 0x194),
+    )
+    for table_name, count_rel, data_rel, index_rel in lookup_tables:
+        if index_rel + 4 > size:
+            continue
+        count = u32(data, base + count_rel)
+        table_data = u32(data, base + data_rel)
+        table_index = u32(data, base + index_rel)
+        if not (0 < count < 0x1000 and 0 < table_data < table_index < size):
+            continue
+        if table_index + count * 4 > size:
+            continue
+        starts = [u32(data, base + table_index + index * 4) for index in range(count)]
+        if any(not (table_data <= start < table_index) for start in starts):
+            continue
+        reserved_offsets.update(range(table_data, table_index))
+        reserved_offsets.update(range(table_index, table_index + count * 4))
+        for index, start in enumerate(starts):
+            raw_name = u32(data, base + start)
+            name = string_value(strings, raw_name)
+            if not name:
+                name = f"Entry{index:03d}"
+            stem = f"{table_name}.{clean_label(name)}"
+            lookup_roots.append((start, stem))
+            labels[start] = ("string", f"{stem}.Name")
+
+    collision_count = u32(data, base + 0x178) if size >= 0x180 else 0
+    collision_start = u32(data, base + 0x17C) if size >= 0x180 else 0
+    collision_end = u32(data, base + 0x1A0) if size >= 0x1A4 else 0
+    if (
+        0 < collision_count < 0x10000
+        and 0 < collision_start < collision_end <= size
+        and collision_start + collision_count * 0x30 == collision_end
+    ):
+        reserved_offsets.update(range(collision_start, collision_end))
+        annotate_fixed_records("CollisionRecords", collision_start, collision_count, 0x30)
+
+    action_tree_start = u32(data, base + 0x1A0) if size >= 0x1A4 else 0
+    action_tree_end = u32(data, base + 0x1A8) if size >= 0x1AC else 0
+    if 0 < action_tree_start < action_tree_end <= size:
+        reserved_offsets.update(range(action_tree_start, action_tree_end))
+        extra_roots["ActionTree"] = [(action_tree_start, "ActionTree")]
+        for rel in range(action_tree_start, action_tree_end, 4):
+            labels[rel] = ("u16x2", f"ActionTree.Packed.Word0x{rel - action_tree_start:04X}")
+
+    weapon_count = u32(data, base + 0x1A4) if size >= 0x1AC else 0
+    weapon_start = u32(data, base + 0x1A8) if size >= 0x1AC else 0
+    transform_count = u32(data, base + 0x1AC) if size >= 0x1B8 else 0
+    transform_start = u32(data, base + 0x1B0) if size >= 0x1B8 else 0
+    transform_index = u32(data, base + 0x1B4) if size >= 0x1B8 else 0
+    if 0 < weapon_count < 0x100 and weapon_start + weapon_count * 0x50 == transform_start:
+        reserved_offsets.update(range(weapon_start, transform_start))
+        roots = extra_roots.setdefault("MonsterWeapons", [])
+        for index in range(weapon_count):
+            record = weapon_start + index * 0x50
+            record_name = string_value(strings, u32(data, base + record + 0x08))
+            suffix = clean_label(record_name) if record_name and not record_name.isdigit() else f"Weapon{index:03d}"
+            stem = f"MonsterWeapon.{suffix}"
+            roots.append((record, stem))
+            for field, kind, field_name in MONSTER_WEAPON_FIELDS:
+                rel = record + field
+                if kind == "string" and not is_probable_string_id(strings, u32(data, base + rel)):
+                    kind = "int"
+                labels[rel] = (kind, f"{stem}.{field_name}")
+    if 0 < transform_count < 0x100 and 0 < transform_start < transform_index < size:
+        starts = [u32(data, base + transform_index + index * 4) for index in range(transform_count)]
+        if all(transform_start <= start < transform_index for start in starts):
+            reserved_offsets.update(range(transform_start, transform_index + transform_count * 4))
+            roots = extra_roots.setdefault("IndexedDataBlocks", [])
+            for index, start in enumerate(starts):
+                end = starts[index + 1] if index + 1 < len(starts) else transform_index
+                stem = f"IndexedDataBlocks.Record{index:03d}"
+                roots.append((start, stem))
+                for rel in range(start, end - 3, 4):
+                    labels[rel] = (structural_kind(rel), f"{stem}.Field0x{rel - start:03X}")
+
+    effect_count = u32(data, base + 0x1B8) if size >= 0x1C0 else 0
+    effect_start = u32(data, base + 0x1BC) if size >= 0x1C0 else 0
+    if 0 < effect_count < 0x100 and effect_start + effect_count * 4 <= size:
+        reserved_offsets.update(range(effect_start, effect_start + effect_count * 4))
+        roots = extra_roots.setdefault("EffectResources", [])
+        for index in range(effect_count):
+            rel = effect_start + index * 4
+            name = clean_label(string_value(strings, u32(data, base + rel)))
+            stem = f"EffectResources.{name}"
+            roots.append((rel, stem))
+            labels[rel] = ("string", f"{stem}.Resource")
+
+    ai_count = u32(data, base + 0x1C0) if size >= 0x1CC else 0
+    ai_start = u32(data, base + 0x1C4) if size >= 0x1CC else 0
+    ai_aux_start = u32(data, base + 0x1C8) if size >= 0x1CC else 0
+    final_count = u32(data, base + 0x1CC) if size >= 0x1D4 else 0
+    final_start = u32(data, base + 0x1D0) if size >= 0x1D4 else 0
+    if 0 < ai_count < 0x100 and ai_start + ai_count * 0x1E0 == ai_aux_start:
+        reserved_offsets.update(range(ai_start, ai_aux_start))
+        annotate_fixed_records("AIProfiles", ai_start, ai_count, 0x1E0, named=True)
+    if 0 < ai_aux_start < final_start <= size:
+        reserved_offsets.update(range(ai_aux_start, final_start))
+        roots = extra_roots.setdefault("AIAuxiliaryData", [(ai_aux_start, "AIAuxiliaryData")])
+        for rel in range(ai_aux_start, final_start, 4):
+            labels[rel] = (structural_kind(rel), f"AIAuxiliaryData.Field0x{rel - ai_aux_start:04X}")
+    if 0 < final_count < 0x100 and 0 < final_start < size and (size - final_start) % final_count == 0:
+        stride = (size - final_start) // final_count
+        if stride and stride % 4 == 0:
+            reserved_offsets.update(range(final_start, size))
+            annotate_fixed_records("FinalTuning", final_start, final_count, stride)
+
+    occupied = set(labels) | reserved_offsets
     for rel, label in scan_string_refs(data, strings, base, size, occupied).items():
         labels.setdefault(rel, ("string", label))
-    occupied = set(labels)
-    action_names = {
-        rel: action_record_name(data, strings, base, rel, size) or f"Action0x{rel:06X}"
-        for rel in action_starts
-    }
+    occupied = set(labels) | reserved_offsets
     for rel, root in scan_pointer_refs(data, base, size, occupied, action_starts).items():
         raw = u32(data, base + rel)
         if root == "ActionRecordRef":
@@ -396,27 +627,58 @@ def export_txt(bundle_path: Path, out_path: Path) -> None:
         "[RootTables.CoreTuning]",
         "@0x000000 CoreTuning",
         "",
-        "[RootTables.TypeResistances]",
-        "@0x000040 TypeResistances",
-        "",
         "[RootTables.ActionRecord]",
     ]
     for rel in action_starts:
         name = action_names[rel]
         lines.append(f"@0x{rel:06X} ActionRecord.{name}")
+    lines.extend(["", "[RootTables.MoveEvents]"])
+    for rel, stem in event_roots:
+        lines.append(f"@0x{rel:06X} {stem}")
+    lines.extend(["", "[RootTables.BodyPartLookup]"])
+    for rel, stem in lookup_roots:
+        if stem.startswith("BodyPartLookup."):
+            lines.append(f"@0x{rel:06X} {stem}")
+    lines.extend(["", "[RootTables.HitLocationLookup]"])
+    for rel, stem in lookup_roots:
+        if stem.startswith("HitLocationLookup."):
+            lines.append(f"@0x{rel:06X} {stem}")
+    if 0 < action_tree_start < action_tree_end <= size:
+        lines.extend([
+            "",
+            "[RootTables.ActionTree]",
+            f"@0x{action_tree_start:06X} ActionTree",
+        ])
+    for table_name in (
+        "CollisionRecords", "MonsterWeapons", "IndexedDataBlocks",
+        "EffectResources", "AIProfiles", "AIAuxiliaryData", "FinalTuning",
+    ):
+        roots = extra_roots.get(table_name, [])
+        if not roots:
+            continue
+        lines.extend(["", f"[RootTables.{table_name}]"])
+        for rel, stem in roots:
+            lines.append(f"@0x{rel:06X} {stem}")
     lines.extend(["", "[MONSTER_DATA]"])
 
     previous_section = ""
+    first_action_rel = min(action_starts, default=size)
     for rel in sorted(labels):
         kind, label = labels[rel]
-        section = label.split(".", 2)[0]
+        parts = label.split(".")
+        if rel < first_action_rel:
+            section = "CoreData"
+        elif label.startswith("ActionRecord.") and len(parts) >= 2:
+            section = ".".join(parts[:2])
+        elif label.startswith("MoveEvent.") and len(parts) >= 3:
+            section = ".".join(parts[:3])
+        elif label.startswith("StringRefs."):
+            section = "StringRefs"
+        else:
+            section = ".".join(parts[:2])
         if previous_section and section != previous_section and lines[-1] != "":
             lines.append("")
         if label.startswith("ActionRecord."):
-            parts = label.split(".")
-            section = ".".join(parts[:2])
-            if section != previous_section and lines[-1] != "":
-                lines.append("")
             if rel in action_starts:
                 record_name = action_names.get(rel, "")
                 state = string_value(strings, u32(data, base + rel + 4))

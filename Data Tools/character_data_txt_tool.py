@@ -653,7 +653,7 @@ def scan_string_triple_runs(data: bytes | bytearray, strings: list[str], base: i
                 break
             if any(strings[value].startswith(".") for value in ids):
                 break
-            # The middle string is usually the runtime class, and first/third are the instance name.
+        # Prefer the runtime-class string, then instance names.
             if strings[ids[0]] != strings[ids[2]]:
                 break
             count += 1
@@ -734,7 +734,7 @@ def target_record_name(data: bytes | bytearray, strings: list[str], base: int, s
             candidates.append((field_rel, strings[raw]))
     if not candidates:
         return None
-    # Prefer the first field for action/state records, animation name at +0x0C for ChAnimResource.
+            # Prefer field 0, or +0x0C for ChAnimResource names.
     type_id = u32(data, base + target + 0x08) if target + 0x08 <= size - 4 else 0
     if 0 <= type_id < len(strings) and strings[type_id].startswith("ChAnim"):
         name_id = u32(data, base + target + 0x0C) if target + 0x0C <= size - 4 else len(strings)

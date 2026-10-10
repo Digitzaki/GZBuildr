@@ -29,6 +29,7 @@ except Exception:
 import tkinter as tk
 from tkinter import ttk, filedialog, scrolledtext, messagebox, simpledialog
 import struct
+import math
 import os
 import shutil
 import zipfile
@@ -42,6 +43,7 @@ import subprocess
 import difflib
 import threading
 import webbrowser
+from xml.dom import minidom
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -49,7 +51,7 @@ try:
     from update_checker import APP_VERSION, REPOSITORY_URL, check_for_updates
     HAS_UPDATE_CHECKER = True
 except Exception:
-    APP_VERSION = "3.2.0"
+    APP_VERSION = "3.5.0"
     REPOSITORY_URL = "https://github.com/Digitzaki/GZBuildr"
     check_for_updates = None
     HAS_UPDATE_CHECKER = False
@@ -84,6 +86,9 @@ APP_BUTTON_ACTIVE_BG = "#3b4350"
 APP_SCROLLBAR_BG = "#2f3640"
 APP_SCROLLBAR_ACTIVE_BG = "#4b5563"
 APP_SETTINGS_FILENAME = "settings.json"
+# Automatic startup checks stay silent unless a release or same-version
+# mini-fix exists. Manual checks from Settings still display every result.
+UPDATE_CHECK_SHOW_ALL_RESULTS = False
 
 
 THEME_PALETTES = {
@@ -103,7 +108,7 @@ THEME_PALETTES = {
     "light": {
         "ttkbootstrap": "flatly",
         "bg": "#f5f5f5",
-        "text_bg": "#ffffff",
+        "text_bg": "#f7f7f8",
         "text_fg": "#111827",
         "select_bg": "#8ec5ff",
         "select_fg": "#000000",
@@ -241,13 +246,22 @@ except Exception:
     load_field_names = None
 
 try:
-    from pvm_script_tool import is_pwk_vm_module, pvm_to_editable, editable_to_pvm
+    from pvm_script_tool import is_pwk_vm_module, parse_pvm, pvm_to_editable, editable_to_pvm
     HAS_PVM_SCRIPT_TOOL = True
 except Exception:
     HAS_PVM_SCRIPT_TOOL = False
     is_pwk_vm_module = None
     pvm_to_editable = None
     editable_to_pvm = None
+    parse_pvm = None
+
+try:
+    from loc_text_tool import loc_to_editable, editable_to_loc
+    HAS_LOC_TEXT_TOOL = True
+except Exception:
+    HAS_LOC_TEXT_TOOL = False
+    loc_to_editable = None
+    editable_to_loc = None
 
 
 def _load_prx_value_editor():
@@ -328,6 +342,98 @@ def _load_monster_data_tool():
     return None
 
 
+def _load_palette_text_tool():
+    candidates = [
+        Path(sys.executable).resolve().parent / "Data Tools" / "palette_text_tool.py",
+        Path(__file__).resolve().parent / "Data Tools" / "palette_text_tool.py",
+        Path(resource_path(os.path.join("Data Tools", "palette_text_tool.py"))),
+        Path(resource_path("palette_text_tool.py")),
+    ]
+    for candidate in candidates:
+        if not candidate.exists():
+            continue
+        try:
+            spec = importlib.util.spec_from_file_location("gzbuildr_palette_text_tool", candidate)
+            if spec is None or spec.loader is None:
+                continue
+            module = importlib.util.module_from_spec(spec)
+            sys.modules[spec.name] = module
+            spec.loader.exec_module(module)
+            return module
+        except Exception as exc:
+            _record_tool_load_error("palette", candidate, exc)
+    return None
+
+
+def _load_static_mesh_viewer():
+    candidates = [
+        Path(sys.executable).resolve().parent / "Data Tools" / "static_mesh_viewer.py",
+        Path(__file__).resolve().parent / "Data Tools" / "static_mesh_viewer.py",
+        Path(resource_path(os.path.join("Data Tools", "static_mesh_viewer.py"))),
+        Path(resource_path("static_mesh_viewer.py")),
+    ]
+    for candidate in candidates:
+        if not candidate.exists():
+            continue
+        try:
+            spec = importlib.util.spec_from_file_location("gzbuildr_static_mesh_viewer", candidate)
+            if spec is None or spec.loader is None:
+                continue
+            module = importlib.util.module_from_spec(spec)
+            sys.modules[spec.name] = module
+            spec.loader.exec_module(module)
+            return module
+        except Exception as exc:
+            _record_tool_load_error("static_mesh", candidate, exc)
+    return None
+
+
+def _load_gamecube_static_mesh():
+    candidates = [
+        Path(sys.executable).resolve().parent / "Data Tools" / "gamecube_static_mesh.py",
+        Path(__file__).resolve().parent / "Data Tools" / "gamecube_static_mesh.py",
+        Path(resource_path(os.path.join("Data Tools", "gamecube_static_mesh.py"))),
+        Path(resource_path("gamecube_static_mesh.py")),
+    ]
+    for candidate in candidates:
+        if not candidate.exists():
+            continue
+        try:
+            spec = importlib.util.spec_from_file_location("gzbuildr_gamecube_static_mesh", candidate)
+            if spec is None or spec.loader is None:
+                continue
+            module = importlib.util.module_from_spec(spec)
+            sys.modules[spec.name] = module
+            spec.loader.exec_module(module)
+            return module
+        except Exception as exc:
+            _record_tool_load_error("gamecube_static_mesh", candidate, exc)
+    return None
+
+
+def _load_ps2_static_mesh():
+    candidates = [
+        Path(sys.executable).resolve().parent / "Data Tools" / "ps2_static_mesh.py",
+        Path(__file__).resolve().parent / "Data Tools" / "ps2_static_mesh.py",
+        Path(resource_path(os.path.join("Data Tools", "ps2_static_mesh.py"))),
+        Path(resource_path("ps2_static_mesh.py")),
+    ]
+    for candidate in candidates:
+        if not candidate.exists():
+            continue
+        try:
+            spec = importlib.util.spec_from_file_location("gzbuildr_ps2_static_mesh", candidate)
+            if spec is None or spec.loader is None:
+                continue
+            module = importlib.util.module_from_spec(spec)
+            sys.modules[spec.name] = module
+            spec.loader.exec_module(module)
+            return module
+        except Exception as exc:
+            _record_tool_load_error("ps2_static_mesh", candidate, exc)
+    return None
+
+
 def _load_cmg_data_tool():
     candidates = [
         Path(sys.executable).resolve().parent / "Data Tools" / "cmg_data_txt_tool.py",
@@ -397,6 +503,53 @@ def _load_level_data_tool():
         except Exception as exc:
             _record_tool_load_error("level_data", candidate, exc)
             continue
+    return None
+
+
+def _load_material_text_tool():
+    candidates = [
+        Path(sys.executable).resolve().parent / "Data Tools" / "material_text_tool.py",
+        Path(__file__).resolve().parent / "Data Tools" / "material_text_tool.py",
+        Path(resource_path(os.path.join("Data Tools", "material_text_tool.py"))),
+        Path(resource_path("material_text_tool.py")),
+    ]
+    for candidate in candidates:
+        if not candidate.exists():
+            continue
+        try:
+            spec = importlib.util.spec_from_file_location("gzbuildr_material_text_tool", candidate)
+            if spec is None or spec.loader is None:
+                continue
+            module = importlib.util.module_from_spec(spec)
+            sys.modules[spec.name] = module
+            spec.loader.exec_module(module)
+            return module
+        except Exception as exc:
+            _record_tool_load_error("material", candidate, exc)
+            continue
+    return None
+
+
+def _load_fdf_text_tool():
+    candidates = [
+        Path(sys.executable).resolve().parent / "Data Tools" / "fdf_text_tool.py",
+        Path(__file__).resolve().parent / "Data Tools" / "fdf_text_tool.py",
+        Path(resource_path(os.path.join("Data Tools", "fdf_text_tool.py"))),
+        Path(resource_path("fdf_text_tool.py")),
+    ]
+    for candidate in candidates:
+        if not candidate.exists():
+            continue
+        try:
+            spec = importlib.util.spec_from_file_location("gzbuildr_fdf_text_tool", candidate)
+            if spec is None or spec.loader is None:
+                continue
+            module = importlib.util.module_from_spec(spec)
+            sys.modules[spec.name] = module
+            spec.loader.exec_module(module)
+            return module
+        except Exception as exc:
+            _record_tool_load_error("fdf", candidate, exc)
     return None
 
 
@@ -643,6 +796,9 @@ def create_dark_scrolled_text(parent, show_horizontal=False, show_diff_marker=Fa
         callback = getattr(text, "_diff_marker_scroll_callback", None)
         if callback:
             callback()
+        syntax_callback = getattr(text, "_syntax_scroll_callback", None)
+        if syntax_callback:
+            syntax_callback()
 
     text.configure(yscrollcommand=_set_yview)
     text._diff_marker_canvas = diff_marker
@@ -762,12 +918,22 @@ CHARACTER_DATA_TOOL = _load_character_data_tool()
 HAS_CHARACTER_DATA_TOOL = CHARACTER_DATA_TOOL is not None
 MONSTER_DATA_TOOL = _load_monster_data_tool()
 HAS_MONSTER_DATA_TOOL = MONSTER_DATA_TOOL is not None
+PALETTE_TEXT_TOOL = _load_palette_text_tool()
+HAS_PALETTE_TEXT_TOOL = PALETTE_TEXT_TOOL is not None
+GAMECUBE_STATIC_MESH = _load_gamecube_static_mesh()
+PS2_STATIC_MESH = _load_ps2_static_mesh()
+STATIC_MESH_VIEWER = _load_static_mesh_viewer()
+HAS_STATIC_MESH_VIEWER = STATIC_MESH_VIEWER is not None
 CMG_DATA_TOOL = _load_cmg_data_tool()
 HAS_CMG_DATA_TOOL = CMG_DATA_TOOL is not None
 SKELETON_TYPE3_TOOL = _load_skeleton_type3_tool()
 HAS_SKELETON_TYPE3_TOOL = SKELETON_TYPE3_TOOL is not None
 LEVEL_DATA_TOOL = _load_level_data_tool()
 HAS_LEVEL_DATA_TOOL = LEVEL_DATA_TOOL is not None
+MATERIAL_TEXT_TOOL = _load_material_text_tool()
+HAS_MATERIAL_TEXT_TOOL = MATERIAL_TEXT_TOOL is not None
+FDF_TEXT_TOOL = _load_fdf_text_tool()
+HAS_FDF_TEXT_TOOL = FDF_TEXT_TOOL is not None
 
 
 def _dialog(parent, dialog_fn, **kwargs):
@@ -793,9 +959,9 @@ except ImportError:
 
 SUPPORTED_BUNDLE_EXTENSIONS = (
     '.bdg', '.cmg', '.cmp', '.clp', '.clf', '.bdp', '.bdl', '.bsf',
-    '.vol', '.ccg', '.cmf', '.ccf', '.zip', '.txt', '.ifc', '.xfg', '.prx', '.edf', '.pvm'
+    '.vol', '.ccg', '.cmf', '.ccf', '.zip', '.txt', '.ifc', '.ifl', '.xfg', '.prx', '.edf', '.pvm', '.loc'
 )
-EDITABLE_ENTRY_EXTENSIONS = ('.bsf', '.txt', '.ifc', '.xfg', '.prx', '.edf', '.pvm')
+EDITABLE_ENTRY_EXTENSIONS = ('.bsf', '.txt', '.ifc', '.ifl', '.xfg', '.prx', '.edf', '.pvm', '.loc')
 CHARACTER_DATA_ENTRY_NAME = "2/character_data"
 MONSTER_DATA_ENTRY_NAME = "2/000monster_data"
 CMG_MONSTER_DATA_RE = re.compile(r"^2/monster_data\d*$")
@@ -1703,6 +1869,9 @@ class PipeworksParser:
             endian_check = struct.unpack('<H', self.file_data[0x2C:0x2E])[0]
             if endian_check == 0:
                 self.is_big_endian = True
+            # DAMM Xbox BDLs use a zero marker despite retaining a little-endian TOC.
+            if os.path.splitext(self.filepath.lower())[1] == '.bdl':
+                self.is_big_endian = False
 
             # Read header values with proper endianness
             self.string_offset = self.read_long(0x34)
@@ -2452,7 +2621,59 @@ class PipeworksParser:
     def _texture_info_from_main_data(self, main_data, resource_size=0):
         if len(main_data) < 0x10:
             return None
-        if not getattr(self, 'is_big_endian', True) and os.path.splitext(self.filepath.lower())[1] in ('.cmp', '.clp', '.bdp', '.bsf'):
+        ext = os.path.splitext(self.filepath.lower())[1]
+        if not getattr(self, 'is_big_endian', True) and ext in ('.cmf', '.ccf', '.bdl'):
+            format_word = struct.unpack_from('<I', main_data, 0x0C)[0]
+            fmt_code = (format_word >> 8) & 0xFF
+            linear_formats = {
+                0x10: ('XBOX_LIN_A1R5G5B5', 2),
+                0x12: ('XBOX_LIN_A8R8G8B8', 4),
+                0x1B: ('XBOX_LIN_AL8', 1),
+                0x1D: ('XBOX_LIN_A4R4G4B4', 2),
+                0x20: ('XBOX_LIN_A8L8', 2),
+            }
+            if fmt_code in linear_formats and len(main_data) >= 0x14:
+                size_word = struct.unpack_from('<I', main_data, 0x10)[0]
+                width = (size_word & 0x0FFF) + 1
+                height = ((size_word >> 12) & 0x0FFF) + 1
+                pitch = (((size_word >> 24) & 0xFF) + 1) * 64
+                fmt_name, bytes_per_pixel = linear_formats[fmt_code]
+                if width <= 0 or height <= 0 or pitch < width * bytes_per_pixel:
+                    return None
+                return {
+                    'width': width,
+                    'height': height,
+                    'pitch': pitch,
+                    'format_code': fmt_code,
+                    'format': fmt_name,
+                    'platform': 'xbox',
+                    'mip_count': 1,
+                    'format_word': format_word,
+                }
+            width_exp = (format_word >> 20) & 0x0F
+            height_exp = (format_word >> 24) & 0x0F
+            mip_count = (format_word >> 16) & 0x0F
+            fmt_name = {
+                7: 'XBOX_X8R8G8B8',
+                12: 'XBOX_DXT1',
+                14: 'XBOX_DXT3',
+                15: 'XBOX_DXT5',
+                1: 'XBOX_AL8',
+                4: 'XBOX_A4R4G4B4',
+                26: 'XBOX_A8L8',
+            }.get(fmt_code)
+            if not fmt_name or width_exp > 13 or height_exp > 13:
+                return None
+            return {
+                'width': 1 << width_exp,
+                'height': 1 << height_exp,
+                'format_code': fmt_code,
+                'format': fmt_name,
+                'platform': 'xbox',
+                'mip_count': max(1, mip_count),
+                'format_word': format_word,
+            }
+        if not getattr(self, 'is_big_endian', True) and ext in ('.cmp', '.clp', '.bdp', '.bsf'):
             width = struct.unpack_from('<H', main_data, 0x08)[0]
             height = struct.unpack_from('<H', main_data, 0x0A)[0]
             if width <= 0 or height <= 0 or width > 8192 or height > 8192:
@@ -2534,6 +2755,22 @@ class PipeworksParser:
             return width * height * 4
         if fmt_name in ('PS2_RGB565', 'PS2_BGR555'):
             return width * height * 2
+        if fmt_name == 'XBOX_X8R8G8B8':
+            return width * height * 4
+        if fmt_name == 'XBOX_A8L8':
+            return width * height * 2
+        if fmt_name == 'XBOX_AL8':
+            return width * height
+        if fmt_name == 'XBOX_A4R4G4B4':
+            return width * height * 2
+        if fmt_name.startswith('XBOX_LIN_'):
+            return width * height * ({'XBOX_LIN_AL8': 1, 'XBOX_LIN_A8R8G8B8': 4}.get(fmt_name, 2))
+        if fmt_name == 'XBOX_DXT1':
+            return ((width + 3) // 4) * ((height + 3) // 4) * 8
+        if fmt_name == 'XBOX_DXT3':
+            return ((width + 3) // 4) * ((height + 3) // 4) * 16
+        if fmt_name == 'XBOX_DXT5':
+            return ((width + 3) // 4) * ((height + 3) // 4) * 16
         if fmt_name == 'I4':
             return ((width + 7) // 8) * ((height + 7) // 8) * 32
         if fmt_name in ('I8', 'IA4'):
@@ -3268,6 +3505,329 @@ class PipeworksParser:
             bits |= (idx & 3) << (30 - 2 * i)
         return struct.pack('>HHI', q0, q1, bits)
 
+    def _xbox_morton_index(self, x, y, width, height):
+        index = 0
+        source_bit = 1
+        output_bit = 1
+        while source_bit < width or source_bit < height:
+            if source_bit < width:
+                if x & source_bit:
+                    index |= output_bit
+                output_bit <<= 1
+            if source_bit < height:
+                if y & source_bit:
+                    index |= output_bit
+                output_bit <<= 1
+            source_bit <<= 1
+        return index
+
+    def _xbox_linear_pitch(self, width, fmt_name):
+        bytes_per_pixel = 1 if fmt_name == 'XBOX_LIN_AL8' else (4 if fmt_name == 'XBOX_LIN_A8R8G8B8' else 2)
+        return ((width * bytes_per_pixel + 63) // 64) * 64
+
+    def _xbox_dxt_palette(self, color0, color1, allow_transparency):
+        p0 = self._rgb565_unpack(color0)
+        p1 = self._rgb565_unpack(color1)
+        if allow_transparency and color0 <= color1:
+            return [
+                p0,
+                p1,
+                tuple((p0[i] + p1[i]) // 2 for i in range(3)) + (255,),
+                (0, 0, 0, 0),
+            ]
+        return [
+            p0,
+            p1,
+            tuple((2 * p0[i] + p1[i]) // 3 for i in range(3)) + (255,),
+            tuple((p0[i] + 2 * p1[i]) // 3 for i in range(3)) + (255,),
+        ]
+
+    def _decode_xbox_texture_image(self, resource_data, info):
+        if not HAS_PIL:
+            return None
+        width = info['width']
+        height = info['height']
+        fmt_name = info['format']
+        image = Image.new('RGBA', (width, height))
+        pixels = image.load()
+        fmt_code = info.get('format_code')
+        if fmt_name.startswith('XBOX_LIN_'):
+            pitch = info['pitch']
+            for y in range(height):
+                for x in range(width):
+                    if fmt_name == 'XBOX_LIN_AL8':
+                        value = resource_data[y * pitch + x]
+                        luminance = (value & 0x0F) * 17
+                        alpha = ((value >> 4) & 0x0F) * 17
+                        pixels[x, y] = (luminance, luminance, luminance, alpha)
+                    elif fmt_name == 'XBOX_LIN_A8R8G8B8':
+                        offset = y * pitch + x * 4
+                        b, g, r, a = resource_data[offset:offset + 4]
+                        pixels[x, y] = (r, g, b, a)
+                    else:
+                        offset = y * pitch + x * 2
+                        value = struct.unpack_from('<H', resource_data, offset)[0]
+                        if fmt_name == 'XBOX_LIN_A1R5G5B5':
+                            a = 255 if value & 0x8000 else 0
+                            r = ((value >> 10) & 31) * 255 // 31
+                            g = ((value >> 5) & 31) * 255 // 31
+                            b = (value & 31) * 255 // 31
+                        elif fmt_name == 'XBOX_LIN_A4R4G4B4':
+                            a = ((value >> 12) & 15) * 17
+                            r = ((value >> 8) & 15) * 17
+                            g = ((value >> 4) & 15) * 17
+                            b = (value & 15) * 17
+                        else:
+                            luminance = value & 0xFF
+                            a = (value >> 8) & 0xFF
+                            r = g = b = luminance
+                        pixels[x, y] = (r, g, b, a)
+            return image
+        if fmt_name == 'XBOX_X8R8G8B8':
+            for y in range(height):
+                for x in range(width):
+                    offset = self._xbox_morton_index(x, y, width, height) * 4
+                    if offset + 4 > len(resource_data):
+                        return None
+                    b, g, r, _unused = resource_data[offset:offset + 4]
+                    pixels[x, y] = (r, g, b, 255)
+            return image
+        if fmt_name == 'XBOX_A8L8':
+            for y in range(height):
+                for x in range(width):
+                    offset = self._xbox_morton_index(x, y, width, height) * 2
+                    if offset + 2 > len(resource_data):
+                        return None
+                    luminance, alpha = resource_data[offset:offset + 2]
+                    pixels[x, y] = (luminance, luminance, luminance, alpha)
+            return image
+        if fmt_name == 'XBOX_AL8':
+            for y in range(height):
+                for x in range(width):
+                    offset = self._xbox_morton_index(x, y, width, height)
+                    value = resource_data[offset]
+                    luminance = (value & 0x0F) * 17
+                    alpha = ((value >> 4) & 0x0F) * 17
+                    pixels[x, y] = (luminance, luminance, luminance, alpha)
+            return image
+        if fmt_name == 'XBOX_A4R4G4B4':
+            for y in range(height):
+                for x in range(width):
+                    offset = self._xbox_morton_index(x, y, width, height) * 2
+                    value = struct.unpack_from('<H', resource_data, offset)[0]
+                    pixels[x, y] = (
+                        ((value >> 8) & 15) * 17,
+                        ((value >> 4) & 15) * 17,
+                        (value & 15) * 17,
+                        ((value >> 12) & 15) * 17,
+                    )
+            return image
+
+        block_size = 8 if fmt_name == 'XBOX_DXT1' else 16
+        blocks_wide = max(1, (width + 3) // 4)
+        blocks_high = max(1, (height + 3) // 4)
+        for block_y in range(blocks_high):
+            for block_x in range(blocks_wide):
+                offset = (block_y * blocks_wide + block_x) * block_size
+                if offset + block_size > len(resource_data):
+                    return None
+                block = resource_data[offset:offset + block_size]
+                if fmt_name == 'XBOX_DXT3':
+                    alpha_bits = int.from_bytes(block[:8], 'little')
+                    color_offset = 8
+                    alpha_palette = None
+                    alpha_selectors = None
+                elif fmt_name == 'XBOX_DXT5':
+                    alpha0, alpha1 = block[0], block[1]
+                    alpha_selectors = int.from_bytes(block[2:8], 'little')
+                    if alpha0 > alpha1:
+                        alpha_palette = [alpha0, alpha1] + [
+                            ((7 - i) * alpha0 + i * alpha1) // 7 for i in range(1, 7)
+                        ]
+                    else:
+                        alpha_palette = [alpha0, alpha1] + [
+                            ((5 - i) * alpha0 + i * alpha1) // 5 for i in range(1, 5)
+                        ] + [0, 255]
+                    alpha_bits = None
+                    color_offset = 8
+                else:
+                    alpha_bits = None
+                    alpha_palette = None
+                    alpha_selectors = None
+                    color_offset = 0
+                color0, color1, selectors = struct.unpack_from('<HHI', block, color_offset)
+                palette = self._xbox_dxt_palette(color0, color1, fmt_name == 'XBOX_DXT1')
+                for py in range(4):
+                    for px in range(4):
+                        pixel_index = py * 4 + px
+                        rgba = palette[(selectors >> (pixel_index * 2)) & 3]
+                        if alpha_bits is not None:
+                            alpha = ((alpha_bits >> (pixel_index * 4)) & 0x0F) * 17
+                            rgba = rgba[:3] + (alpha,)
+                        elif alpha_palette is not None:
+                            alpha = alpha_palette[(alpha_selectors >> (pixel_index * 3)) & 7]
+                            rgba = rgba[:3] + (alpha,)
+                        x = block_x * 4 + px
+                        y = block_y * 4 + py
+                        if x < width and y < height:
+                            pixels[x, y] = rgba
+        return image
+
+    def _encode_xbox_dxt_block(self, block_pixels, alpha_mode=None):
+        with_explicit_alpha = alpha_mode in {'dxt3', 'dxt5'}
+        opaque_pixels = [(r, g, b) for r, g, b, a in block_pixels if a >= 128]
+        colors = opaque_pixels or [(0, 0, 0)]
+        luminance = lambda color: color[0] * 0.299 + color[1] * 0.587 + color[2] * 0.114
+        color0 = self._rgb565_pack(*max(colors, key=luminance))
+        color1 = self._rgb565_pack(*min(colors, key=luminance))
+        use_dxt1_alpha = not with_explicit_alpha and any(a < 128 for _r, _g, _b, a in block_pixels)
+        if use_dxt1_alpha:
+            if color0 > color1:
+                color0, color1 = color1, color0
+        else:
+            if color0 <= color1:
+                if color0 == color1:
+                    color0 = min(0xFFFF, color0 + 1)
+                if color0 <= color1:
+                    color0, color1 = color1, color0
+        palette = self._xbox_dxt_palette(color0, color1, use_dxt1_alpha)
+        selectors = 0
+        alpha_bits = 0
+        for index, (r, g, b, a) in enumerate(block_pixels):
+            if use_dxt1_alpha and a < 128:
+                selected = 3
+            else:
+                distances = [
+                    (r - pr) ** 2 + (g - pg) ** 2 + (b - pb) ** 2
+                    for pr, pg, pb, _pa in palette
+                ]
+                if use_dxt1_alpha:
+                    distances[3] = 1 << 60
+                selected = min(range(4), key=distances.__getitem__)
+            selectors |= selected << (index * 2)
+            if alpha_mode == 'dxt3':
+                alpha_bits |= max(0, min(15, round(a / 17))) << (index * 4)
+        color_data = struct.pack('<HHI', color0, color1, selectors)
+        if alpha_mode == 'dxt3':
+            return alpha_bits.to_bytes(8, 'little') + color_data
+        if alpha_mode == 'dxt5':
+            alphas = [pixel[3] for pixel in block_pixels]
+            alpha0 = max(alphas)
+            alpha1 = min(alphas)
+            if alpha0 == alpha1:
+                alpha_palette = [alpha0] * 8
+            else:
+                alpha_palette = [alpha0, alpha1] + [
+                    ((7 - i) * alpha0 + i * alpha1) // 7 for i in range(1, 7)
+                ]
+            alpha_selectors = 0
+            for index, alpha in enumerate(alphas):
+                selected = min(range(8), key=lambda item: abs(alpha - alpha_palette[item]))
+                alpha_selectors |= selected << (index * 3)
+            return bytes((alpha0, alpha1)) + alpha_selectors.to_bytes(6, 'little') + color_data
+        return color_data
+
+    def _encode_xbox_texture_level(self, source_image, fmt_name, width, height):
+        resampling = getattr(Image, 'Resampling', Image)
+        image = source_image.resize((width, height), getattr(resampling, 'LANCZOS', Image.LANCZOS)).convert('RGBA')
+        pixels = image.load()
+        if fmt_name.startswith('XBOX_LIN_'):
+            pitch = self._xbox_linear_pitch(width, fmt_name)
+            output = bytearray(pitch * height)
+            for y in range(height):
+                for x in range(width):
+                    r, g, b, a = pixels[x, y]
+                    if fmt_name == 'XBOX_LIN_AL8':
+                        luminance = round((r + g + b) / 3) >> 4
+                        output[y * pitch + x] = ((a >> 4) << 4) | luminance
+                    elif fmt_name == 'XBOX_LIN_A8R8G8B8':
+                        offset = y * pitch + x * 4
+                        output[offset:offset + 4] = bytes((b, g, r, a))
+                    else:
+                        offset = y * pitch + x * 2
+                        if fmt_name == 'XBOX_LIN_A1R5G5B5':
+                            value = ((1 if a >= 128 else 0) << 15) | (round(r * 31 / 255) << 10) | (round(g * 31 / 255) << 5) | round(b * 31 / 255)
+                        elif fmt_name == 'XBOX_LIN_A4R4G4B4':
+                            value = (round(a / 17) << 12) | (round(r / 17) << 8) | (round(g / 17) << 4) | round(b / 17)
+                        else:
+                            luminance = max(0, min(255, round((r + g + b) / 3)))
+                            value = (a << 8) | luminance
+                        struct.pack_into('<H', output, offset, value)
+            return bytes(output)
+        if fmt_name == 'XBOX_X8R8G8B8':
+            output = bytearray(width * height * 4)
+            for y in range(height):
+                for x in range(width):
+                    r, g, b, _a = pixels[x, y]
+                    offset = self._xbox_morton_index(x, y, width, height) * 4
+                    output[offset:offset + 4] = bytes((b, g, r, 255))
+            return bytes(output)
+        if fmt_name == 'XBOX_A8L8':
+            output = bytearray(width * height * 2)
+            for y in range(height):
+                for x in range(width):
+                    r, g, b, a = pixels[x, y]
+                    luminance = max(0, min(255, round((r + g + b) / 3)))
+                    offset = self._xbox_morton_index(x, y, width, height) * 2
+                    output[offset:offset + 2] = bytes((luminance, a))
+            return bytes(output)
+        if fmt_name == 'XBOX_AL8':
+            output = bytearray(width * height)
+            for y in range(height):
+                for x in range(width):
+                    r, g, b, a = pixels[x, y]
+                    luminance = round((r + g + b) / 3) >> 4
+                    output[self._xbox_morton_index(x, y, width, height)] = ((a >> 4) << 4) | luminance
+            return bytes(output)
+        if fmt_name == 'XBOX_A4R4G4B4':
+            output = bytearray(width * height * 2)
+            for y in range(height):
+                for x in range(width):
+                    r, g, b, a = pixels[x, y]
+                    value = (round(a / 17) << 12) | (round(r / 17) << 8) | (round(g / 17) << 4) | round(b / 17)
+                    offset = self._xbox_morton_index(x, y, width, height) * 2
+                    struct.pack_into('<H', output, offset, value)
+            return bytes(output)
+
+        block_size = 8 if fmt_name == 'XBOX_DXT1' else 16
+        blocks_wide = max(1, (width + 3) // 4)
+        blocks_high = max(1, (height + 3) // 4)
+        output = bytearray(blocks_wide * blocks_high * block_size)
+        for block_y in range(blocks_high):
+            for block_x in range(blocks_wide):
+                block_pixels = []
+                for py in range(4):
+                    for px in range(4):
+                        x = min(width - 1, block_x * 4 + px)
+                        y = min(height - 1, block_y * 4 + py)
+                        block_pixels.append(pixels[x, y])
+                alpha_mode = 'dxt3' if fmt_name == 'XBOX_DXT3' else ('dxt5' if fmt_name == 'XBOX_DXT5' else None)
+                encoded = self._encode_xbox_dxt_block(block_pixels, alpha_mode)
+                offset = (block_y * blocks_wide + block_x) * block_size
+                output[offset:offset + block_size] = encoded
+        return bytes(output)
+
+    def _encode_xbox_texture_image(self, source_image, info, original_resource_data):
+        if info['format'].startswith('XBOX_LIN_'):
+            encoded = self._encode_xbox_texture_level(source_image, info['format'], info['width'], info['height'])
+            if len(encoded) != len(original_resource_data):
+                return None
+            return encoded
+        layout, used_size = self._texture_mip_layout(
+            info['format'], info['width'], info['height'], len(original_resource_data)
+        )
+        if not layout:
+            return None
+        output = bytearray()
+        for width, height, _offset, expected_size in layout[:info.get('mip_count', len(layout))]:
+            encoded = self._encode_xbox_texture_level(source_image, info['format'], width, height)
+            if len(encoded) != expected_size:
+                return None
+            output.extend(encoded)
+        if len(output) < len(original_resource_data):
+            output.extend(original_resource_data[len(output):])
+        return bytes(output)
+
     def _extract_texture_png(self, resource_entry, resource_data, output_path):
         if not HAS_PIL:
             print(f"    Texture PNG skipped for {resource_entry.get('name')}: Pillow is not installed")
@@ -3285,6 +3845,8 @@ class PipeworksParser:
             return
         if info.get('platform') == 'ps2':
             image = self._decode_ps2_texture_image(resource_data, info, main_entry)
+        elif info.get('platform') == 'xbox':
+            image = self._decode_xbox_texture_image(resource_data, info)
         else:
             image = self._decode_texture_image(resource_data[:base_size], info['format'], info['width'], info['height'])
         if not image:
@@ -3358,6 +3920,20 @@ class PipeworksParser:
             print(
                 f"      PNG texture encoded: {os.path.basename(png_path)} -> "
                 f"{info['format']} {info['width']}x{info['height']}"
+            )
+            return encoded
+        if info.get('platform') == 'xbox':
+            encoded = self._encode_xbox_texture_image(source_image, info, original_resource_data)
+            if encoded is None or len(encoded) != len(original_resource_data):
+                encoded_size = len(encoded) if encoded is not None else 0
+                print(
+                    f"      WARNING CRITICAL: Encoded Xbox texture size changed "
+                    f"({encoded_size} vs original {len(original_resource_data)})"
+                )
+                return None
+            print(
+                f"      PNG texture encoded: {os.path.basename(png_path)} -> "
+                f"{info['format']} {info['width']}x{info['height']} with {info.get('mip_count', 1)} mip level(s)"
             )
             return encoded
         layout, used_size = self._texture_mip_layout(info['format'], info['width'], info['height'], len(original_resource_data))
@@ -4250,6 +4826,7 @@ class PipeworksParser:
                 if padding > 0:
                     new_resource_data.extend(b'\x00' * padding)
                     print(f"Added {padding} bytes of padding to resource data block for {file_end_alignment}-byte alignment")
+            struct.pack_into(f'{endian}I', header_and_toc, 0x74, len(new_resource_data))
 
             print(f"\nFinal structure:")
             print(f"  Header + TOC size: {header_size} (0x{header_size:X})")
@@ -6617,135 +7194,6 @@ class RebuildWindow:
             messagebox.showerror("Error", f"Failed to create VOL bundle:\n{e}")
             import traceback
             traceback.print_exc()
-        return
-
-        self.status_text.insert(tk.END, f"\n=== Building New VOL Bundle ===\n")
-        self.status_text.insert(tk.END, f"Source directory: {source_dir}\n")
-        self.status_text.update()
-
-        try:
-            # Scan directory for files
-            file_list = []
-            for root, dirs, files in os.walk(source_dir):
-                for filename in files:
-                    filepath = os.path.join(root, filename)
-
-                    with open(filepath, 'rb') as f:
-                        data = f.read()
-
-                    # Store only base filename (all files on root)
-                    file_list.append({
-                        'name': filename,
-                        'data': data,
-                        'size': len(data)
-                    })
-
-            if not file_list:
-                messagebox.showerror("Error", "No files found in directory!")
-                return
-
-            # Sort files alphabetically by name
-            file_list.sort(key=lambda x: x['name'].lower())
-
-            self.status_text.insert(tk.END, f"Found {len(file_list)} files (sorted alphabetically)\n")
-
-            # Build VOL structure
-            file_count = len(file_list)
-
-            # Calculate offsets
-            header_size = 16
-            toc_size = file_count * 0xC
-            string_offset_table_size = file_count * 4
-
-            # Build string table
-            string_data = bytearray()
-            string_offsets = []
-            for file_info in file_list:
-                string_offsets.append(len(string_data))
-                # Store filename as-is (already just the base filename)
-                string_data.extend(file_info['name'].encode('ascii') + b'\x00')
-
-            # String table starts after header + TOC + offset table + 4-byte size field
-            string_table_start = header_size + toc_size + string_offset_table_size + 4
-            string_table_end = string_table_start + len(string_data)
-
-            # Align data start to 0x800 (2048 bytes)
-            data_start = ((string_table_end + 0x7FF) // 0x800) * 0x800
-            padding_before_data = data_start - string_table_end
-
-            # Calculate file offsets with 16-byte alignment
-            file_offsets = []
-            current_offset = data_start
-            for file_info in file_list:
-                file_offsets.append(current_offset)
-                current_offset += file_info['size']
-                # Align to next 16-byte boundary with minimum 16 bytes padding
-                padding = (16 - (current_offset % 16)) % 16
-                if padding == 0:
-                    padding = 16
-                current_offset += padding
-
-            # Build the VOL file
-            output_data = bytearray()
-
-            # Header
-            output_data.extend(b'PVOL')
-            output_data.extend(struct.pack('<I', 0x1001))
-            output_data.extend(struct.pack('<I', file_count))
-            output_data.extend(struct.pack('<I', string_table_end))
-
-            # TOC
-            for i, file_info in enumerate(file_list):
-                output_data.extend(struct.pack('<I', file_offsets[i]))
-                output_data.extend(struct.pack('<I', file_info['size']))
-                output_data.extend(struct.pack('<I', i))  # File ID
-
-            # String offset table
-            for offset in string_offsets:
-                output_data.extend(struct.pack('<I', offset))
-
-            # String section size
-            output_data.extend(struct.pack('<I', len(string_data)))
-
-            # String data
-            output_data.extend(string_data)
-
-            # Padding before data
-            output_data.extend(b'\xFF' * padding_before_data)
-
-            # File data
-            for i, file_info in enumerate(file_list):
-                output_data.extend(file_info['data'])
-
-                # Add padding between files
-                if i < len(file_list) - 1:
-                    current_pos = len(output_data)
-                    padding = (16 - (current_pos % 16)) % 16
-                    if padding == 0:
-                        padding = 16
-                    output_data.extend(b'\xFF' * padding)
-
-            # Final padding
-            current_pos = len(output_data)
-            padding = (16 - (current_pos % 16)) % 16
-            output_data.extend(b'\xFF' * (padding + 16))
-
-            # Write file
-            with open(output_path, 'wb') as f:
-                f.write(output_data)
-
-            self.status_text.insert(tk.END, f"\n✓ VOL bundle created successfully!\n")
-            self.status_text.insert(tk.END, f"Output: {output_path}\n")
-            self.status_text.insert(tk.END, f"Size: {len(output_data)} bytes\n")
-
-            messagebox.showinfo("Success", f"VOL bundle created successfully!\n\nOutput: {output_path}")
-            self.output_text_callback(f"\nVOL bundle created successfully: {output_path}\n")
-
-        except Exception as e:
-            self.status_text.insert(tk.END, f"\n✗ Error creating VOL bundle: {e}\n")
-            messagebox.showerror("Error", f"Failed to create VOL bundle:\n{e}")
-            import traceback
-            traceback.print_exc()
 
     def destroy(self):
         """Destroy window"""
@@ -6772,14 +7220,22 @@ class PipeworksGUI:
         self._current_zip_bundle = None  # Extracted bundle path from current ZIP
         self.extract_selection_bundle_key = None
         self.extract_selection_file_nums = set()
-        self.text_mode = None  # 'bsf', 'txt', 'ifc', 'xfg', 'prx', 'edf', 'pvm', 'char_data', 'level_data', or 'skeleton_type3'
+        self.text_mode = None  # 'bsf', 'txt', 'ifc', 'ifl', 'xfg', 'prx', 'edf', 'pvm', 'char_data', 'level_data', or 'skeleton_type3'
         self.text_source_path = None
         self.bundle_entry_edit = None
         self.bundle_entry_session = None
         self.texture_preview_session = None
         self.texture_preview_entry = None
         self.texture_preview_image = None
+        self.static_mesh_preview_session = None
+        self.static_mesh_preview_entry = None
+        self.static_mesh_preview_viewer = None
+        self.static_mesh_export_parts = []
+        self.fdf_font_preview_image = None
         self._updating_bundle_dropdown = False
+        self.bundle_search_generation = 0
+        self.bundle_search_window = None
+        self.bundle_search_results = []
 
         self._disable_combobox_mousewheel()
 
@@ -6870,14 +7326,14 @@ class PipeworksGUI:
         self.bundle_select_frame.grid_remove()
 
         # Output section
-        output_frame = ttk.LabelFrame(main_frame, text="Output", padding="5")
-        output_frame.grid(row=3, column=0, sticky=(tk.W, tk.E, tk.N, tk.S))
-        output_frame.columnconfigure(0, weight=1)
-        output_frame.rowconfigure(0, weight=1)
+        self.output_frame = ttk.LabelFrame(main_frame, text="Output", padding="5")
+        self.output_frame.grid(row=3, column=0, sticky=(tk.W, tk.E, tk.N, tk.S))
+        self.output_frame.columnconfigure(0, weight=1)
+        self.output_frame.rowconfigure(0, weight=1)
 
         # Output text area with scrollbar
         output_text_frame, self.output_text = create_dark_scrolled_text(
-            output_frame,
+            self.output_frame,
             show_horizontal=True,
             show_diff_marker=True,
             wrap=tk.NONE,
@@ -6892,12 +7348,22 @@ class PipeworksGUI:
         self.output_text.tag_configure("find_match", background="#f59f00", foreground="black")
         self.syntax_highlight_after_id = None
         self.syntax_lazy_after_id = None
-        self.syntax_lazy_next_line = 1
         self.syntax_lazy_generation = 0
+        self.syntax_highlighted_intervals = []
+        self.syntax_view_after_id = None
+        self.syntax_prefetch_after_id = None
+        self.syntax_prefetch_target = None
+        self._syntax_pattern_cache = None
         self.character_data_decode_generation = 0
+        self.editor_load_generation = 0
         self.loading_text_editor = False
         self.editor_original_text = ""
         self.editor_original_lines = []
+        self.monster_data_disassembly_active = False
+        self.monster_data_editable_text = None
+        self.monster_data_editable_baseline = None
+        self.monster_data_disassembly_baseline = None
+        self.monster_data_disassembly_generation = 0
         self.editor_diff_after_id = None
         self.editor_diff_marks = {}
         self.editor_manual_diff_marks = {}
@@ -6905,14 +7371,18 @@ class PipeworksGUI:
         self.editor_restored_deleted_chunks = set()
         self.editor_diff_tooltip = None
         self.root_toc_fold_tags = {}
+        self.root_toc_jump_targets = {}
+        self.root_toc_jump_marks = []
+        self.pvm_global_folds = {}
         self.editor_diff_canvas = getattr(self.output_text, "_diff_marker_canvas", None)
         self.output_text._diff_marker_scroll_callback = self._draw_editor_diff_markers
+        self.output_text._syntax_scroll_callback = self.schedule_visible_editor_syntax
         self.configure_syntax_tags()
         self.configure_editor_diff_tags()
         self._setup_editor_diff_marker_bindings()
 
         self.find_var = tk.StringVar()
-        self.find_frame = tk.Frame(output_frame, bd=1, relief=tk.SOLID, bg=APP_BG, highlightbackground=APP_BORDER)
+        self.find_frame = tk.Frame(self.output_frame, bd=1, relief=tk.SOLID, bg=APP_BG, highlightbackground=APP_BORDER)
         find_font = ('TkDefaultFont', 8)
         self.find_entry = tk.Entry(
             self.find_frame,
@@ -6970,19 +7440,23 @@ class PipeworksGUI:
         self.output_text.bind("<Control-F>", self._on_editor_find_hotkey)
         self.output_text.bind("<KeyRelease>", self._on_editor_key_release)
         self.output_text.bind("<<Modified>>", self._on_editor_text_modified)
-        self.output_text.bind("<<Paste>>", lambda _event: self.root.after(1, self.refresh_visible_editor_formatting))
-        self.output_text.bind("<<Cut>>", lambda _event: self.root.after(1, self.refresh_visible_editor_formatting))
+        self.output_text.bind("<<Paste>>", lambda _event: self.root.after(1, lambda: self.refresh_visible_editor_formatting(force_syntax=True)))
+        self.output_text.bind("<<Cut>>", lambda _event: self.root.after(1, lambda: self.refresh_visible_editor_formatting(force_syntax=True)))
         self.output_text.bind("<ButtonRelease>", lambda _event: self._draw_editor_diff_markers())
-        self.output_text.bind("<MouseWheel>", lambda _event: self.root.after_idle(self.refresh_visible_editor_formatting))
         self.output_text.bind("<Configure>", lambda _event: self.root.after_idle(self.refresh_visible_editor_formatting))
         self.output_text.tag_bind("root_table_header", "<Enter>", lambda _event: self.output_text.config(cursor="hand2"))
         self.output_text.tag_bind("root_table_header", "<Leave>", lambda _event: self.output_text.config(cursor=""))
         self.output_text.tag_bind("root_table_header", "<Button-1>", self._on_root_table_header_click)
+        self.output_text.tag_bind("pvm_fold_header", "<Enter>", lambda _event: self.output_text.config(cursor="hand2"))
+        self.output_text.tag_bind("pvm_fold_header", "<Leave>", lambda _event: self.output_text.config(cursor=""))
+        self.output_text.tag_bind("pvm_fold_header", "<Button-1>", self._on_root_table_header_click)
 
         # Enable drag and drop (must be after output_text is created)
         self.setup_drag_drop()
+        self.root.after_idle(self.show_find_bar)
         apply_button_outline(self.root)
         self.root.after(100, self.restore_last_input)
+        self.root.after(1200, self.begin_startup_update_check)
 
     def get_last_initial_dir(self):
         last_path = self.settings.get("last_input_path", "")
@@ -7028,6 +7502,7 @@ class PipeworksGUI:
         save_app_settings(self.settings)
         configure_app_theme(self.root, self.theme_mode)
         self.configure_syntax_tags()
+        self._refresh_bundle_entry_link_colors()
         self.configure_editor_diff_tags()
         self.start_lazy_syntax_highlight(clear_existing=False)
         self.schedule_editor_diff_update()
@@ -7050,6 +7525,106 @@ class PipeworksGUI:
                 set_dark_title_bar(window)
             except Exception:
                 pass
+
+    def show_update_result(self, result=None, error=None, parent=None, button=None, show_all=True):
+        parent = parent or self.root
+        try:
+            if not parent.winfo_exists():
+                return
+        except Exception:
+            return
+        try:
+            if button is not None and button.winfo_exists():
+                button.config(text="Check Updates", state=tk.NORMAL)
+        except Exception:
+            pass
+
+        if error is not None:
+            if show_all:
+                messagebox.showerror("Update Check", str(error), parent=parent)
+            return
+
+        result = result or {}
+        status = result.get("status")
+        latest = result.get("latest_tag") or "unknown"
+        if status == "update":
+            if result.get("reason") == "checksum":
+                detail = (
+                    f"A newer GZBuildr {APP_VERSION} build is available.\n\n"
+                    "The release version is the same, but the downloadable EXE contains a mini-fix."
+                )
+            else:
+                detail = (
+                    "A new GZBuildr release is available.\n\n"
+                    f"Installed: {APP_VERSION}\n"
+                    f"Latest: {latest}"
+                )
+            if messagebox.askyesno("Update Available", detail + "\n\nOpen the download page?", parent=parent):
+                webbrowser.open(result.get("download_url") or result.get("release_url") or REPOSITORY_URL)
+            return
+
+        if not show_all:
+            return
+        if status == "current":
+            hash_note = "\nThe executable hash also matches the release asset." if result.get("checksum_checked") else ""
+            messagebox.showinfo(
+                "GZBuildr Is Current",
+                f"GZBuildr {APP_VERSION} is up to date.{hash_note}",
+                parent=parent,
+            )
+        elif status == "ahead":
+            messagebox.showinfo(
+                "Development Build",
+                f"This build ({APP_VERSION}) is newer than the latest release ({latest}).",
+                parent=parent,
+            )
+        elif status == "no_release":
+            messagebox.showinfo("Update Check", "No published GZBuildr release was found.", parent=parent)
+        else:
+            messagebox.showwarning(
+                "Update Check",
+                f"Could not compare version {APP_VERSION} with release tag {latest}.",
+                parent=parent,
+            )
+
+    def begin_update_check(self, parent=None, button=None, show_all=True):
+        parent = parent or self.root
+        if not HAS_UPDATE_CHECKER or check_for_updates is None:
+            self.show_update_result(
+                error="The GZBuildr update checker is missing.",
+                parent=parent,
+                button=button,
+                show_all=show_all,
+            )
+            return
+        if button is not None:
+            try:
+                button.config(text="Checking...", state=tk.DISABLED)
+            except Exception:
+                pass
+
+        def worker():
+            try:
+                result = check_for_updates()
+            except Exception as exc:
+                self.root.after(
+                    0,
+                    lambda exc=exc: self.show_update_result(
+                        error=exc, parent=parent, button=button, show_all=show_all
+                    ),
+                )
+                return
+            self.root.after(
+                0,
+                lambda result=result: self.show_update_result(
+                    result=result, parent=parent, button=button, show_all=show_all
+                ),
+            )
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def begin_startup_update_check(self):
+        self.begin_update_check(parent=self.root, show_all=UPDATE_CHECK_SHOW_ALL_RESULTS)
 
     def open_settings_window(self):
         self.settings = load_app_settings()
@@ -7075,67 +7650,8 @@ class PipeworksGUI:
         ttk.Radiobutton(theme_frame, text="Dark", variable=theme_var, value="dark", command=apply_theme_choice).pack(side=tk.LEFT, padx=(0, 12))
         ttk.Radiobutton(theme_frame, text="Light", variable=theme_var, value="light", command=apply_theme_choice).pack(side=tk.LEFT)
 
-        def show_update_result(result=None, error=None):
-            if not window.winfo_exists():
-                return
-            update_btn.config(text="Check Updates", state=tk.NORMAL)
-            if error is not None:
-                messagebox.showerror("Update Check", str(error), parent=window)
-                return
-
-            status = result.get("status")
-            latest = result.get("latest_tag") or "unknown"
-            if status == "update":
-                if result.get("reason") == "checksum":
-                    detail = (
-                        f"A newer GZBuildr {APP_VERSION} build is available.\n\n"
-                        "The release version is the same, but the downloadable EXE contains a mini-fix."
-                    )
-                else:
-                    detail = (
-                        "A new GZBuildr release is available.\n\n"
-                        f"Installed: {APP_VERSION}\n"
-                        f"Latest: {latest}"
-                    )
-                if messagebox.askyesno("Update Available", detail + "\n\nOpen the download page?", parent=window):
-                    webbrowser.open(result.get("download_url") or result.get("release_url") or REPOSITORY_URL)
-            elif status == "current":
-                hash_note = "\nThe executable hash also matches the release asset." if result.get("checksum_checked") else ""
-                messagebox.showinfo(
-                    "GZBuildr Is Current",
-                    f"GZBuildr {APP_VERSION} is up to date.{hash_note}",
-                    parent=window,
-                )
-            elif status == "ahead":
-                messagebox.showinfo(
-                    "Development Build",
-                    f"This build ({APP_VERSION}) is newer than the latest release ({latest}).",
-                    parent=window,
-                )
-            elif status == "no_release":
-                messagebox.showinfo("Update Check", "No published GZBuildr release was found.", parent=window)
-            else:
-                messagebox.showwarning(
-                    "Update Check",
-                    f"Could not compare version {APP_VERSION} with release tag {latest}.",
-                    parent=window,
-                )
-
         def begin_update_check():
-            if not HAS_UPDATE_CHECKER or check_for_updates is None:
-                messagebox.showerror("Update Check", "The GZBuildr update checker is missing.", parent=window)
-                return
-            update_btn.config(text="Checking...", state=tk.DISABLED)
-
-            def worker():
-                try:
-                    result = check_for_updates()
-                except Exception as exc:
-                    self.root.after(0, lambda exc=exc: show_update_result(error=exc))
-                    return
-                self.root.after(0, lambda result=result: show_update_result(result=result))
-
-            threading.Thread(target=worker, daemon=True).start()
+            self.begin_update_check(parent=window, button=update_btn, show_all=True)
 
         guide_url = "https://docs.google.com/document/d/1RUNoN5BRV3ffKtD6eFLpz6YigDBNTD5PU3UafYJerOc/edit?usp=sharing"
         guide_btn = ttk.Button(theme_frame, text="Guide", command=lambda: webbrowser.open(guide_url))
@@ -7298,7 +7814,35 @@ class PipeworksGUI:
             return None
         self.schedule_syntax_highlight()
         self.schedule_editor_diff_update()
+        if self.text_mode == "camera_path":
+            self.root.after_idle(self._refresh_camera_degree_comment)
         return None
+
+    def _refresh_camera_degree_comment(self):
+        if self.text_mode != "camera_path" or self.loading_text_editor:
+            return
+        try:
+            line_index = self.output_text.index(tk.INSERT).split(".", 1)[0]
+            start = f"{line_index}.0"
+            end = f"{line_index}.end"
+            line = self.output_text.get(start, end)
+            match = re.match(
+                r"^(\s*@0x[0-9A-Fa-f]+\s+float\s+Frame\[\d+\]\.FieldOfView\s*=\s*)"
+                r"([^;#]+)(;)(?:\s*#.*)?$",
+                line,
+            )
+            if not match:
+                return
+            radians = float(match.group(2).strip())
+            refreshed = f"{match.group(1)}{match.group(2).strip()};  # {math.degrees(radians):.3f} degrees"
+            if refreshed == line:
+                return
+            insert_offset = int(self.output_text.index(tk.INSERT).split(".", 1)[1])
+            self.output_text.delete(start, end)
+            self.output_text.insert(start, refreshed)
+            self.output_text.mark_set(tk.INSERT, f"{line_index}.{min(insert_offset, len(refreshed))}")
+        except (ValueError, tk.TclError):
+            return
 
     def _on_editor_text_modified(self, event=None):
         try:
@@ -7309,7 +7853,10 @@ class PipeworksGUI:
             return None
         if not self.text_mode or self.loading_text_editor:
             return None
-        self.root.after_idle(self.refresh_visible_editor_formatting)
+        self.syntax_highlighted_intervals = []
+        self.root.after_idle(lambda: self.refresh_visible_editor_formatting(force_syntax=True))
+        if self.text_mode == "palette":
+            self.root.after_idle(self._tag_palette_color_swatches)
         return None
 
     def _visible_editor_range(self):
@@ -7320,16 +7867,92 @@ class PipeworksGUI:
         except Exception:
             return "1.0", tk.END
 
-    def refresh_visible_editor_syntax(self):
+    def schedule_visible_editor_syntax(self):
+        if not self.text_mode or self.loading_text_editor:
+            return
+        if self.syntax_view_after_id is not None:
+            return
+        self.syntax_view_after_id = self.root.after(0, self.refresh_visible_editor_syntax)
+
+    def _syntax_interval_is_highlighted(self, start_line, end_line):
+        return any(start <= start_line and end_line <= finish for start, finish in self.syntax_highlighted_intervals)
+
+    def _syntax_uncovered_intervals(self, start_line, end_line):
+        uncovered = []
+        cursor = start_line
+        for start, finish in self.syntax_highlighted_intervals:
+            if finish < cursor:
+                continue
+            if start > end_line:
+                break
+            if start > cursor:
+                uncovered.append((cursor, min(end_line, start - 1)))
+            cursor = max(cursor, finish + 1)
+            if cursor > end_line:
+                break
+        if cursor <= end_line:
+            uncovered.append((cursor, end_line))
+        return uncovered
+
+    def _record_syntax_interval(self, start_line, end_line):
+        intervals = self.syntax_highlighted_intervals + [(start_line, end_line)]
+        merged = []
+        for start, finish in sorted(intervals):
+            if merged and start <= merged[-1][1] + 1:
+                merged[-1] = (merged[-1][0], max(merged[-1][1], finish))
+            else:
+                merged.append((start, finish))
+        self.syntax_highlighted_intervals = merged
+
+    def refresh_visible_editor_syntax(self, force=False):
+        self.syntax_view_after_id = None
         if not self.text_mode:
             return
         start_index, end_index = self._visible_editor_range()
-        self._apply_syntax_highlight_range(start_index, end_index)
+        try:
+            visible_start = int(start_index.split(".", 1)[0])
+            visible_end = int(end_index.split(".", 1)[0])
+            total_lines = int(self.output_text.index("end-1c").split(".", 1)[0])
+        except (ValueError, tk.TclError):
+            self._apply_syntax_highlight_range(start_index, end_index)
+            return
+        if force:
+            pending_intervals = [(visible_start, visible_end)]
+        else:
+            pending_intervals = self._syntax_uncovered_intervals(visible_start, visible_end)
+        for highlight_start, highlight_end in pending_intervals:
+            self._apply_syntax_highlight_range(f"{highlight_start}.0", f"{highlight_end}.end")
+            self._record_syntax_interval(highlight_start, highlight_end)
+        buffer_lines = max(180, (visible_end - visible_start + 1) * 6)
+        self.syntax_prefetch_target = (
+            max(1, visible_start - buffer_lines),
+            min(total_lines, visible_end + buffer_lines),
+        )
+        self._schedule_syntax_prefetch()
 
-    def refresh_visible_editor_formatting(self):
+    def _schedule_syntax_prefetch(self):
+        if self.syntax_prefetch_after_id is not None or not self.text_mode or self.loading_text_editor:
+            return
+        self.syntax_prefetch_after_id = self.root.after(2, self._run_syntax_prefetch)
+
+    def _run_syntax_prefetch(self):
+        self.syntax_prefetch_after_id = None
+        if not self.text_mode or self.loading_text_editor or not self.syntax_prefetch_target:
+            return
+        target_start, target_end = self.syntax_prefetch_target
+        pending = self._syntax_uncovered_intervals(target_start, target_end)
+        if not pending:
+            return
+        start_line, end_line = pending[0]
+        end_line = min(end_line, start_line + 39)
+        self._apply_syntax_highlight_range(f"{start_line}.0", f"{end_line}.end")
+        self._record_syntax_interval(start_line, end_line)
+        self._schedule_syntax_prefetch()
+
+    def refresh_visible_editor_formatting(self, force_syntax=False):
         if not self.text_mode:
             return
-        self.refresh_visible_editor_syntax()
+        self.refresh_visible_editor_syntax(force=force_syntax)
         if self._editor_diff_disabled():
             self._clear_editor_diff_marks()
             return
@@ -7377,10 +8000,13 @@ class PipeworksGUI:
     def _editor_diff_disabled(self):
         return self.text_mode in {"char_data", "level_data"}
 
+    @staticmethod
+    def _normalize_editor_text(text):
+        return str(text or '').replace('\r\n', '\n').replace('\r', '\n').rstrip('\n') + '\n'
+
     def _sync_editor_diff_baseline(self, text=None):
-        self.editor_original_text = text if text is not None else self._current_editor_text()
-        if not self.editor_original_text.endswith("\n"):
-            self.editor_original_text += "\n"
+        source = text if text is not None else self._current_editor_text()
+        self.editor_original_text = self._normalize_editor_text(source)
         self.editor_original_lines = self.editor_original_text.splitlines()
         self.editor_deleted_anchor_hints = {}
         self.editor_restored_deleted_chunks = set()
@@ -7929,6 +8555,18 @@ class PipeworksGUI:
                 "syntax_root": "#e879f9",
                 "syntax_member": "#22d3ee",
                 "syntax_asset": "#fb923c",
+                "syntax_reference": "#fb923c",
+                "syntax_variable": APP_TEXT_FG,
+                "syntax_function": "#86efac",
+                "syntax_parameter": "#fb923c",
+                "syntax_block": "#fb923c",
+                "syntax_method": "#22d3ee",
+                "syntax_method_deep": "#fb7185",
+                "syntax_markup_bracket": "#94a3b8",
+                "syntax_markup_tag": "#60a5fa",
+                "syntax_markup_attribute": "#c084fc",
+                "syntax_markup_text": "#86efac",
+                "syntax_markup_number": "#fde68a",
             }
         else:
             colors = {
@@ -7948,10 +8586,37 @@ class PipeworksGUI:
                 "syntax_root": "#7e22ce",
                 "syntax_member": "#0369a1",
                 "syntax_asset": "#c2410c",
+                "syntax_reference": "#c2410c",
+                "syntax_variable": APP_TEXT_FG,
+                "syntax_function": "#15803d",
+                "syntax_parameter": "#c2410c",
+                "syntax_block": "#c2410c",
+                "syntax_method": "#0369a1",
+                "syntax_method_deep": "#be123c",
+                "syntax_markup_bracket": "#64748b",
+                "syntax_markup_tag": "#1d4ed8",
+                "syntax_markup_attribute": "#7e22ce",
+                "syntax_markup_text": "#15803d",
+                "syntax_markup_number": "#7c3aed",
             }
         for tag, color in colors.items():
             self.output_text.tag_configure(tag, foreground=color)
+        self.output_text.tag_configure("decompile_type", foreground=colors["syntax_type"])
+        self.output_text.tag_configure("decompile_field", foreground=colors["syntax_member"])
+        self.output_text.tag_configure("decompile_number", foreground=colors["syntax_number"])
+        self.output_text.tag_configure("decompile_name", foreground=colors["syntax_root"])
+        self.output_text.tag_configure("decompile_hidden", elide=True)
         self.output_text.tag_configure("root_table_header", foreground=colors["syntax_offset"], underline=True)
+        self.output_text.tag_configure("pvm_fold_header", foreground=colors["syntax_block"], underline=True)
+        for tag in (
+            "syntax_field", "syntax_variable", "syntax_root", "syntax_member",
+            "syntax_number", "syntax_value_string", "syntax_asset", "syntax_reference",
+            "syntax_operator", "syntax_function", "syntax_method", "syntax_method_deep", "syntax_parameter", "syntax_keyword", "syntax_block", "syntax_type", "syntax_row_type", "syntax_code",
+            "syntax_markup_bracket", "syntax_markup_tag", "syntax_markup_attribute", "syntax_markup_text",
+            "syntax_string", "syntax_comment", "syntax_offset", "syntax_markup_number", "root_table_header", "find_match",
+            "decompile_type", "decompile_field", "decompile_number", "decompile_name", "decompile_hidden",
+        ):
+            self.output_text.tag_raise(tag)
 
     def _syntax_tag_names(self):
         return (
@@ -7971,7 +8636,74 @@ class PipeworksGUI:
             "syntax_root",
             "syntax_member",
             "syntax_asset",
+            "syntax_reference",
+            "syntax_variable",
+            "syntax_function",
+            "syntax_parameter",
+            "syntax_block",
+            "syntax_method",
+            "syntax_method_deep",
+            "syntax_markup_bracket",
+            "syntax_markup_tag",
+            "syntax_markup_attribute",
+            "syntax_markup_text",
+            "syntax_markup_number",
+            "decompile_type",
+            "decompile_field",
+            "decompile_number",
+            "decompile_name",
+            "decompile_hidden",
         )
+
+    def _highlight_monsterdata_disassembly(self, text, add_range):
+        block_re = re.compile(
+            r"^[ \t]*(moves|move|events|event|action_tree|node|transition|condition|command_stream|command|unowned_events|table)\b",
+            re.MULTILINE,
+        )
+        for match in block_re.finditer(text):
+            add_range("syntax_block", match.start(1), match.end(1))
+        for match in re.finditer(r'(?:(?:@[0-9A-Fa-fx]+\s+)|(?:->\s*))"([^"]*)"', text):
+            add_range("syntax_root", match.start(1), match.end(1))
+        for match in re.finditer(r"@0x[0-9A-Fa-f]+", text):
+            add_range("syntax_offset", match.start(), match.end())
+        for match in re.finditer(r"^[ \t]+@0x[0-9A-Fa-f]+\s+([^;{}\n]+?)\s*$", text, re.MULTILINE):
+            add_range("decompile_name", match.start(1), match.end(1))
+        opcode_re = re.compile(
+            r"^[ \t]*(@0x[0-9A-Fa-f]+\s+)(opcode)\s+"
+            r"([-+]?(?:0x[0-9A-Fa-f]+|\d+))\s+([A-Za-z_][A-Za-z0-9_]*)",
+            re.MULTILINE,
+        )
+        for match in opcode_re.finditer(text):
+            indent_length = len(match.group(0)) - len(match.group(0).lstrip(" \t"))
+            add_range("decompile_hidden", match.start() + indent_length, match.start(2))
+            add_range("syntax_keyword", match.start(2), match.end(2))
+            add_range("decompile_number", match.start(3), match.end(3))
+            add_range("syntax_function", match.start(4), match.end(4))
+        record_re = re.compile(
+            r"^[ \t]*@0x[0-9A-Fa-f]+\s+(field|operand)\s+"
+            r"([A-Za-z0-9_]+(?:\[[0-9A-Fa-fxX]+\])?)\s+(.+?)\s*(=)\s*(.*?);[ \t]*$",
+            re.MULTILINE,
+        )
+        numeric_re = re.compile(r"[-+]?(?:0x[0-9A-Fa-f]+|\d+(?:\.\d*)?|\.\d+)(?:[eE][-+]?\d+)?")
+        for match in record_re.finditer(text):
+            line_prefix = text[match.start():match.start(3)]
+            indent_length = len(line_prefix) - len(line_prefix.lstrip(" \t"))
+            add_range("decompile_hidden", match.start() + indent_length, match.start(3))
+            add_range("decompile_field", match.start(3), match.end(3))
+            add_range("syntax_operator", match.start(4), match.end(4))
+            value = match.group(5).strip()
+            value_start = match.start(5) + len(match.group(5)) - len(match.group(5).lstrip())
+            if numeric_re.fullmatch(value) or all(numeric_re.fullmatch(part.strip()) for part in value.split(",")):
+                tag = "decompile_number"
+            elif match.group(2) == "string":
+                tag = "syntax_string"
+            elif match.group(2) == "ref":
+                tag = "syntax_reference"
+            else:
+                tag = "syntax_atom"
+            add_range(tag, value_start, value_start + len(value))
+        for match in re.finditer(r"->|[{};=]", text):
+            add_range("syntax_operator", match.start(), match.end())
 
     def clear_root_table_folds(self):
         for header_tag, content_tag in getattr(self, "root_toc_fold_tags", {}).items():
@@ -7981,14 +8713,34 @@ class PipeworksGUI:
             except Exception:
                 pass
         self.root_toc_fold_tags = {}
+        for tag in getattr(self, "root_toc_jump_targets", {}):
+            try:
+                self.output_text.tag_delete(tag)
+            except Exception:
+                pass
+        for mark in getattr(self, "root_toc_jump_marks", []):
+            try:
+                self.output_text.mark_unset(mark)
+            except Exception:
+                pass
+        self.root_toc_jump_targets = {}
+        self.root_toc_jump_marks = []
+        for header_tag, fold in getattr(self, "pvm_global_folds", {}).items():
+            for tag in (header_tag, fold["content"], fold["open"], fold["close"]):
+                try:
+                    self.output_text.tag_delete(tag)
+                except Exception:
+                    pass
+        self.pvm_global_folds = {}
         try:
             self.output_text.tag_remove("root_table_header", "1.0", tk.END)
+            self.output_text.tag_remove("pvm_fold_header", "1.0", tk.END)
         except Exception:
             pass
 
     def setup_root_table_folds(self):
         self.clear_root_table_folds()
-        if self.text_mode not in {"char_data", "level_data", "prx"}:
+        if self.text_mode not in {"char_data", "level_data", "prx", "pvm", "skeleton_type3"}:
             return
         try:
             document_lines = self.output_text.get("1.0", "end-1c").splitlines()
@@ -7997,6 +8749,179 @@ class PipeworksGUI:
         fold_index = 0
         line_index = 0
         total_lines = len(document_lines)
+        if self.text_mode == "skeleton_type3":
+            collapsed_sections = {
+                "[Skeleton.NameRefs]",
+                "[Skeleton4.NodeRecordPointers]",
+            }
+            for header_index, header_text in enumerate(document_lines):
+                if header_text.strip() not in collapsed_sections:
+                    continue
+                content_end = next(
+                    (
+                        candidate
+                        for candidate in range(header_index + 1, total_lines)
+                        if document_lines[candidate].strip().startswith("[")
+                    ),
+                    total_lines,
+                )
+                header_tag = f"skeleton_header_{fold_index}"
+                content_tag = f"skeleton_fold_{fold_index}"
+                line_no = header_index + 1
+                self.output_text.tag_add("root_table_header", f"{line_no}.0", f"{line_no}.end")
+                self.output_text.tag_add(header_tag, f"{line_no}.0", f"{line_no}.end")
+                if content_end > header_index + 1:
+                    fold_end = content_end if not document_lines[content_end - 1].strip() else content_end + 1
+                    self.output_text.tag_add(content_tag, f"{line_no + 1}.0", f"{fold_end}.0")
+                    self.output_text.tag_configure(content_tag, elide=True)
+                    self.root_toc_fold_tags[header_tag] = content_tag
+                fold_index += 1
+            return
+        if self.text_mode == "char_data" and self.monster_data_disassembly_active:
+            targets = {}
+            target_re = re.compile(r'^move\s+@0x([0-9A-Fa-f]+)\s+"([^"]+)"\s*\{')
+            for target_index, target_text in enumerate(document_lines):
+                match = target_re.match(target_text.strip())
+                if match:
+                    targets[int(match.group(1), 16)] = target_index + 1
+            for header_index, header_text in enumerate(document_lines):
+                if header_text.strip() != "moves [Open][Close]":
+                    continue
+                brace_index = header_index + 1
+                close_index = next(
+                    (candidate for candidate in range(brace_index + 1, total_lines) if document_lines[candidate].strip() == "}"),
+                    None,
+                )
+                if close_index is None:
+                    break
+                line_no = header_index + 1
+                header_tag = "monster_moves_header"
+                content_tag = "monster_moves_content"
+                open_tag = "monster_moves_open_label"
+                close_tag = "monster_moves_close_label"
+                open_start = header_text.index("[Open]")
+                close_start = header_text.index("[Close]")
+                self.output_text.tag_add("pvm_fold_header", f"{line_no}.0", f"{line_no}.end")
+                self.output_text.tag_add(header_tag, f"{line_no}.0", f"{line_no}.end")
+                self.output_text.tag_add(open_tag, f"{line_no}.{open_start}", f"{line_no}.{open_start + 6}")
+                self.output_text.tag_add(close_tag, f"{line_no}.{close_start}", f"{line_no}.{close_start + 7}")
+                self.output_text.tag_add(content_tag, f"{brace_index + 1}.0", f"{close_index + 2}.0")
+                self.output_text.tag_configure(content_tag, elide=True)
+                self.output_text.tag_configure(open_tag, elide=False)
+                self.output_text.tag_configure(close_tag, elide=True)
+                label_color = self.output_text.tag_cget("syntax_block", "foreground")
+                self.output_text.tag_configure(open_tag, foreground=label_color)
+                self.output_text.tag_configure(close_tag, foreground=label_color)
+                self.pvm_global_folds[header_tag] = {
+                    "content": content_tag,
+                    "open": open_tag,
+                    "close": close_tag,
+                }
+                entry_re = re.compile(r"^\s*@0x([0-9A-Fa-f]+)\s+(.+?)\s*$")
+                for entry_index in range(brace_index + 1, close_index):
+                    match = entry_re.match(document_lines[entry_index])
+                    if not match:
+                        continue
+                    target_line = targets.get(int(match.group(1), 16))
+                    if target_line is None:
+                        continue
+                    tag = f"root_toc_jump_{len(self.root_toc_jump_targets)}"
+                    mark = f"root_toc_target_{len(self.root_toc_jump_targets)}"
+                    entry_line = entry_index + 1
+                    offset_start = document_lines[entry_index].index("@0x")
+                    offset_end = offset_start + len(f"@0x{match.group(1)}")
+                    name_start = match.start(2)
+                    name_end = match.end(2)
+                    self.output_text.tag_add("decompile_name", f"{entry_line}.{name_start}", f"{entry_line}.{name_end}")
+                    self.output_text.tag_add("root_table_header", f"{entry_line}.{offset_start}", f"{entry_line}.{offset_end}")
+                    self.output_text.tag_add(tag, f"{entry_line}.{offset_start}", f"{entry_line}.{offset_end}")
+                    self.output_text.mark_set(mark, f"{target_line}.0")
+                    self.output_text.mark_gravity(mark, tk.LEFT)
+                    self.root_toc_jump_targets[tag] = mark
+                    self.root_toc_jump_marks.append(mark)
+                break
+            return
+        if self.text_mode == "pvm":
+            for header_index, header_text in enumerate(document_lines):
+                if header_text.strip() != "globals [Open][Close]":
+                    continue
+                brace_index = header_index + 1
+                if brace_index >= total_lines or document_lines[brace_index].strip() != "{":
+                    continue
+                depth = 0
+                close_index = None
+                for candidate in range(brace_index, total_lines):
+                    depth += document_lines[candidate].count("{")
+                    depth -= document_lines[candidate].count("}")
+                    if depth == 0:
+                        close_index = candidate
+                        break
+                if close_index is None:
+                    continue
+                line_no = header_index + 1
+                header_tag = "pvm_globals_header"
+                content_tag = "pvm_globals_content"
+                open_tag = "pvm_globals_open_label"
+                close_tag = "pvm_globals_close_label"
+                open_start = header_text.index("[Open]")
+                close_start = header_text.index("[Close]")
+                header_start = header_text.index("globals")
+                self.output_text.tag_add("pvm_fold_header", f"{line_no}.{header_start}", f"{line_no}.end")
+                self.output_text.tag_add(header_tag, f"{line_no}.{header_start}", f"{line_no}.end")
+                self.output_text.tag_add(open_tag, f"{line_no}.{open_start}", f"{line_no}.{open_start + 6}")
+                self.output_text.tag_add(close_tag, f"{line_no}.{close_start}", f"{line_no}.{close_start + 7}")
+                self.output_text.tag_add(content_tag, f"{brace_index + 1}.0", f"{close_index + 2}.0")
+                self.output_text.tag_configure(content_tag, elide=True)
+                self.output_text.tag_configure(open_tag, elide=False)
+                self.output_text.tag_configure(close_tag, elide=True)
+                label_color = self.output_text.tag_cget("syntax_block", "foreground")
+                self.output_text.tag_configure(open_tag, foreground=label_color)
+                self.output_text.tag_configure(close_tag, foreground=label_color)
+                self.pvm_global_folds[header_tag] = {
+                    "content": content_tag,
+                    "open": open_tag,
+                    "close": close_tag,
+                }
+                break
+            return
+
+        if self.text_mode == "prx":
+            targets = {}
+            target_re = re.compile(r"^property_set\s+(.+?)\s*\{\s*#\s*table\s+0x([0-9A-Fa-f]+)")
+            for target_index, target_text in enumerate(document_lines):
+                match = target_re.match(target_text.strip())
+                if match:
+                    targets[(int(match.group(2), 16), match.group(1).strip())] = target_index + 1
+
+            in_table_index = False
+            entry_re = re.compile(r"^@0x([0-9A-Fa-f]+)\s+(.+?)\s*$")
+            for entry_index, entry_text in enumerate(document_lines):
+                stripped = entry_text.strip()
+                if stripped == "[RootTables.PRXTables]":
+                    in_table_index = True
+                    continue
+                if not in_table_index:
+                    continue
+                if not stripped or stripped.startswith("["):
+                    break
+                match = entry_re.match(stripped)
+                if not match:
+                    continue
+                target_line = targets.get((int(match.group(1), 16), match.group(2).strip()))
+                if target_line is None:
+                    continue
+                tag = f"root_toc_jump_{len(self.root_toc_jump_targets)}"
+                mark = f"root_toc_target_{len(self.root_toc_jump_targets)}"
+                line_no = entry_index + 1
+                offset_end = len(f"@0x{match.group(1)}")
+                self.output_text.tag_add("root_table_header", f"{line_no}.0", f"{line_no}.{offset_end}")
+                self.output_text.tag_add(tag, f"{line_no}.0", f"{line_no}.{offset_end}")
+                self.output_text.mark_set(mark, f"{target_line}.0")
+                self.output_text.mark_gravity(mark, tk.LEFT)
+                self.root_toc_jump_targets[tag] = mark
+                self.root_toc_jump_marks.append(mark)
+            return
+
         while line_index < total_lines:
             text = document_lines[line_index].strip()
             if not re.match(r"^\[RootTables\.[^\]]+\]$", text):
@@ -8030,10 +8955,30 @@ class PipeworksGUI:
         try:
             index = self.output_text.index(f"@{event.x},{event.y}")
             header_tag = next(
-                (tag for tag in self.output_text.tag_names(index) if tag in self.root_toc_fold_tags),
+                (
+                    tag
+                    for tag in self.output_text.tag_names(index)
+                    if tag in self.root_toc_fold_tags
+                    or tag in self.root_toc_jump_targets
+                    or tag in self.pvm_global_folds
+                ),
                 None,
             )
             if header_tag is None:
+                return "break"
+            jump_mark = self.root_toc_jump_targets.get(header_tag)
+            if jump_mark is not None:
+                self.output_text.mark_set(tk.INSERT, jump_mark)
+                self.output_text.see(jump_mark)
+                self.output_text.focus_set()
+                return "break"
+            pvm_fold = self.pvm_global_folds.get(header_tag)
+            if pvm_fold is not None:
+                is_closed = str(self.output_text.tag_cget(pvm_fold["content"], "elide")).lower() in {"1", "true", "yes"}
+                self.output_text.tag_configure(pvm_fold["content"], elide=not is_closed)
+                self.output_text.tag_configure(pvm_fold["open"], elide=is_closed)
+                self.output_text.tag_configure(pvm_fold["close"], elide=not is_closed)
+                self.root.after_idle(self.refresh_visible_editor_syntax)
                 return "break"
             content_tag = self.root_toc_fold_tags[header_tag]
             current = str(self.output_text.tag_cget(content_tag, "elide")).lower() in {"1", "true", "yes"}
@@ -8053,6 +8998,19 @@ class PipeworksGUI:
 
     def cancel_lazy_syntax_highlight(self):
         self.syntax_lazy_generation += 1
+        if self.syntax_view_after_id is not None:
+            try:
+                self.root.after_cancel(self.syntax_view_after_id)
+            except Exception:
+                pass
+            self.syntax_view_after_id = None
+        if self.syntax_prefetch_after_id is not None:
+            try:
+                self.root.after_cancel(self.syntax_prefetch_after_id)
+            except Exception:
+                pass
+            self.syntax_prefetch_after_id = None
+        self.syntax_prefetch_target = None
         if self.syntax_lazy_after_id is not None:
             try:
                 self.root.after_cancel(self.syntax_lazy_after_id)
@@ -8126,55 +9084,24 @@ class PipeworksGUI:
             self._setup_bundle_entry_selector(self.bundle_entry_edit.get("entry", {}))
         elif self.texture_preview_session and self.texture_preview_entry:
             self._setup_texture_preview_selector(self.texture_preview_entry)
+        elif self.static_mesh_preview_session and self.static_mesh_preview_entry:
+            self._setup_static_mesh_preview_selector(self.static_mesh_preview_entry)
 
     def start_lazy_syntax_highlight(self, clear_existing=False):
         self.cancel_lazy_syntax_highlight()
+        self.syntax_highlighted_intervals = []
         if clear_existing:
             for tag in self._syntax_tag_names():
                 self.output_text.tag_remove(tag, "1.0", tk.END)
         if not self.text_mode:
             return
-        try:
-            total_lines = int(str(self.output_text.index("end-1c")).split(".", 1)[0])
-        except Exception:
-            total_lines = 0
-        if self.text_mode in {"char_data", "level_data"} and total_lines > 3000:
-            self.root.after_idle(self.refresh_visible_editor_syntax)
-            self._begin_syntax_progress(total_lines)
-        self.syntax_lazy_next_line = 1
-        generation = self.syntax_lazy_generation
-        self.syntax_lazy_after_id = self.root.after_idle(lambda: self._run_lazy_syntax_highlight(generation))
+        self.syntax_lazy_after_id = self.root.after_idle(self.refresh_visible_editor_syntax)
 
     def start_visible_syntax_highlight_only(self):
         self.cancel_lazy_syntax_highlight()
+        self.syntax_highlighted_intervals = []
         if self.text_mode:
             self.root.after_idle(self.refresh_visible_editor_syntax)
-
-    def _run_lazy_syntax_highlight(self, generation):
-        self.syntax_lazy_after_id = None
-        if generation != self.syntax_lazy_generation or not self.text_mode:
-            self._end_syntax_progress()
-            return
-        try:
-            total_lines = int(str(self.output_text.index("end-1c")).split(".", 1)[0])
-        except Exception:
-            self._end_syntax_progress()
-            return
-        if self.syntax_lazy_next_line > total_lines:
-            self._end_syntax_progress()
-            return
-
-        start_line = self.syntax_lazy_next_line
-        chunk_size = 399 if self.text_mode in {"char_data", "level_data"} and total_lines > 3000 else 199
-        end_line = min(total_lines, start_line + chunk_size)
-        self._apply_syntax_highlight_range(f"{start_line}.0", f"{end_line}.end")
-        self.syntax_lazy_next_line = end_line + 1
-        self._update_syntax_progress(end_line, total_lines)
-        delay_ms = 1 if self.text_mode in {"char_data", "level_data"} and total_lines > 3000 else 0
-        if delay_ms:
-            self.syntax_lazy_after_id = self.root.after(delay_ms, lambda: self._run_lazy_syntax_highlight(generation))
-        else:
-            self.syntax_lazy_after_id = self.root.after_idle(lambda: self._run_lazy_syntax_highlight(generation))
 
     def _current_syntax_line_bounds(self):
         try:
@@ -8199,14 +9126,15 @@ class PipeworksGUI:
         for tag in self._syntax_tag_names():
             self.output_text.tag_remove(tag, start_index, end_index)
 
-        patterns = [
+        if self._syntax_pattern_cache is None:
+            self._syntax_pattern_cache = [
             ("syntax_section", re.compile(r"^\[[^\]\n]+\]", re.MULTILINE)),
             ("syntax_field", re.compile(r"^[ \t]*(?!@?0x[0-9A-Fa-f]+\b)@?[A-Za-z0-9_][A-Za-z0-9_.:]*", re.MULTILINE)),
             ("syntax_code", re.compile(r"\[[A-Za-z0-9?]{1,4}\]")),
             ("syntax_offset", re.compile(r"(?<![A-Za-z0-9_])@?0x[0-9A-Fa-f]+")),
             ("syntax_keyword", re.compile(
                 r"\b(?:if|else|for|while|do|switch|case|default|return|break|continue|"
-                r"class|struct|enum|const|static|public|private|protected|virtual|new|delete|"
+                r"class|struct|enum|function|extern|const|static|public|private|protected|virtual|new|delete|"
                 r"true|false|null|None|and|or|not|constant)\b"
             )),
             ("syntax_type", re.compile(
@@ -8216,19 +9144,87 @@ class PipeworksGUI:
             ("syntax_number", re.compile(r"(?<![A-Za-z0-9_.])[-+]?(?:\d+\.\d*|\.\d+|\d+)(?:[eE][-+]?\d+)?(?![A-Za-z0-9_.])")),
             ("syntax_operator", re.compile(r"[{}=?:|]")),
             ("syntax_string", re.compile(r'"(?:\\.|[^"\\])*"|\'(?:\\.|[^\'\\])*\'', re.DOTALL)),
-            ("syntax_comment", re.compile(r"/\*.*?\*/|//[^\n]*|#[^\n]*|;[^\n]*", re.DOTALL)),
-        ]
+            ("syntax_comment", re.compile(r"/\*.*?\*/|//[^\n]*|(?<![A-Za-z0-9_])#[^\n]*|;[^\n]*", re.DOTALL)),
+            ]
+        patterns = list(self._syntax_pattern_cache)
         if self.text_mode in ("bsf", "edf"):
             patterns.insert(
                 -3,
                 ("syntax_atom", re.compile(r"\b(?:[A-Z][A-Za-z0-9_]{2,}|[A-Za-z]+_[A-Za-z0-9_]+)\b")),
             )
 
+        tag_ranges = {tag: [] for tag in self._syntax_tag_names()}
+
+        def add_range(tag, start, end):
+            tag_ranges[tag].extend((f"{start_index}+{start}c", f"{start_index}+{end}c"))
+
         for tag, pattern in patterns:
             for match in pattern.finditer(text):
-                start = f"{start_index}+{match.start()}c"
-                end = f"{start_index}+{match.end()}c"
-                self.output_text.tag_add(tag, start, end)
+                add_range(tag, match.start(), match.end())
+
+        if self.text_mode == "ifl":
+            ifl_line_re = re.compile(r"^[ \t]*([^\s#;]+)(?:[ \t]+([-+]?\d+))?[ \t]*$", re.MULTILINE)
+            for match in ifl_line_re.finditer(text):
+                add_range("syntax_asset", match.start(1), match.end(1))
+                if match.group(2) is not None:
+                    add_range("syntax_markup_number", match.start(2), match.end(2))
+
+        if self.text_mode in ("xfg", "ifc"):
+            markup_comment_re = re.compile(r"<!--.*?-->", re.DOTALL)
+            for match in markup_comment_re.finditer(text):
+                add_range("syntax_comment", match.start(), match.end())
+
+            markup_tag_re = re.compile(
+                r"<(?![!?])(/?)([A-Za-z_][A-Za-z0-9_.:-]*)([^<>]*?)(/?)>",
+                re.DOTALL,
+            )
+            attribute_re = re.compile(
+                r"([A-Za-z_][A-Za-z0-9_.:-]*)(\s*=\s*)(\"(?:\\.|[^\"\\])*\"|'(?:\\.|[^'\\])*')",
+                re.DOTALL,
+            )
+            for match in markup_tag_re.finditer(text):
+                opening_end = match.start(2)
+                add_range("syntax_markup_bracket", match.start(), opening_end)
+                add_range("syntax_markup_tag", match.start(2), match.end(2))
+                closing_start = match.end() - (2 if match.group(4) else 1)
+                add_range("syntax_markup_bracket", closing_start, match.end())
+                attributes = match.group(3)
+                attributes_start = match.start(3)
+                for attribute in attribute_re.finditer(attributes):
+                    add_range(
+                        "syntax_markup_attribute",
+                        attributes_start + attribute.start(1),
+                        attributes_start + attribute.end(1),
+                    )
+                    add_range(
+                        "syntax_operator",
+                        attributes_start + attribute.start(2),
+                        attributes_start + attribute.end(2),
+                    )
+
+            markup_text_re = re.compile(r">([^<]+)<")
+            numeric_markup_re = re.compile(
+                r"[-+]?(?:0x[0-9A-Fa-f]+|\d+(?:\.\d*)?|\.\d+)(?:[eE][-+]?\d+)?"
+            )
+            asset_markup_re = re.compile(
+                r"[^\s<>]+\.(?:edf|prx|pvm|pwk|bsf|txt|xfg|ifc|ifl|resource)",
+                re.IGNORECASE,
+            )
+            for match in markup_text_re.finditer(text):
+                raw_value = match.group(1)
+                leading = len(raw_value) - len(raw_value.lstrip())
+                value = raw_value.strip()
+                if not value:
+                    continue
+                value_start = match.start(1) + leading
+                value_end = value_start + len(value)
+                if numeric_markup_re.fullmatch(value):
+                    add_range("syntax_markup_number", value_start, value_end)
+                elif asset_markup_re.search(value):
+                    add_range("syntax_asset", value_start, value_end)
+                else:
+                    add_range("syntax_markup_text", value_start, value_end)
+
         if self.text_mode in ("prx", "txt", "xfg", "ifc", "char_data", "level_data", "skeleton_type3"):
             def key_member_split(key):
                 if key.startswith(("StartupRefs.", "StringRefs.")):
@@ -8237,7 +9233,7 @@ class PipeworksGUI:
 
             row_type_re = re.compile(r"^@0x[0-9A-Fa-f]+\s+([A-Za-z0-9_\[\]xXa-fA-F]+)", re.MULTILINE)
             for match in row_type_re.finditer(text):
-                self.output_text.tag_add("syntax_row_type", f"{start_index}+{match.start(1)}c", f"{start_index}+{match.end(1)}c")
+                add_range("syntax_row_type", match.start(1), match.end(1))
             row_key_re = re.compile(r"^@0x[0-9A-Fa-f]+\s+[A-Za-z0-9_\[\]xXa-fA-F]+\s+([^\s=]+)\s*=", re.MULTILINE)
             for match in row_key_re.finditer(text):
                 key = match.group(1)
@@ -8245,14 +9241,14 @@ class PipeworksGUI:
                 if dot_index > 0:
                     root_start = match.start(1)
                     is_first_split_prefix = key.startswith(("StartupRefs.", "StringRefs."))
-                    is_stringref_asset = key.startswith("StringRefs.") and re.search(r"\.(?:edf|prx|pvm|pwk|bsf|txt|xfg|ifc)$", key, re.IGNORECASE)
+                    is_stringref_asset = key.startswith("StringRefs.") and re.search(r"\.(?:edf|prx|pvm|pwk|bsf|txt|xfg|ifc|ifl)$", key, re.IGNORECASE)
                     member_start = match.start(1) + dot_index + (1 if is_first_split_prefix else 0)
                     root_end = member_start if is_first_split_prefix else match.start(1) + dot_index
-                    self.output_text.tag_add("syntax_root", f"{start_index}+{root_start}c", f"{start_index}+{root_end}c")
+                    add_range("syntax_root", root_start, root_end)
                     member_tag = "syntax_asset" if is_stringref_asset else "syntax_member"
-                    self.output_text.tag_add(member_tag, f"{start_index}+{member_start}c", f"{start_index}+{match.end(1)}c")
+                    add_range(member_tag, member_start, match.end(1))
                 else:
-                    self.output_text.tag_add("syntax_root", f"{start_index}+{match.start(1)}c", f"{start_index}+{match.end(1)}c")
+                    add_range("syntax_root", match.start(1), match.end(1))
             bare_key_re = re.compile(r"^[ \t]*([A-Za-z_][A-Za-z0-9_.:-]*)\s*=", re.MULTILINE)
             for match in bare_key_re.finditer(text):
                 key = match.group(1)
@@ -8260,67 +9256,316 @@ class PipeworksGUI:
                 if dot_index > 0:
                     root_start = match.start(1)
                     is_first_split_prefix = key.startswith(("StartupRefs.", "StringRefs."))
-                    is_stringref_asset = key.startswith("StringRefs.") and re.search(r"\.(?:edf|prx|pvm|pwk|bsf|txt|xfg|ifc)$", key, re.IGNORECASE)
+                    is_stringref_asset = key.startswith("StringRefs.") and re.search(r"\.(?:edf|prx|pvm|pwk|bsf|txt|xfg|ifc|ifl)$", key, re.IGNORECASE)
                     member_start = match.start(1) + dot_index + (1 if is_first_split_prefix else 0)
                     root_end = member_start if is_first_split_prefix else match.start(1) + dot_index
-                    self.output_text.tag_add("syntax_root", f"{start_index}+{root_start}c", f"{start_index}+{root_end}c")
+                    add_range("syntax_root", root_start, root_end)
                     member_tag = "syntax_asset" if is_stringref_asset else "syntax_member"
-                    self.output_text.tag_add(member_tag, f"{start_index}+{member_start}c", f"{start_index}+{match.end(1)}c")
+                    add_range(member_tag, member_start, match.end(1))
                 else:
-                    self.output_text.tag_add("syntax_root", f"{start_index}+{match.start(1)}c", f"{start_index}+{match.end(1)}c")
+                    add_range("syntax_root", match.start(1), match.end(1))
             string_value_re = re.compile(r"^@0x[0-9A-Fa-f]+\s+string\s+[^\n=]+\s=\s(.+)$", re.MULTILINE)
             for match in string_value_re.finditer(text):
-                self.output_text.tag_add("syntax_value_string", f"{start_index}+{match.start(1)}c", f"{start_index}+{match.end(1)}c")
+                add_range("syntax_value_string", match.start(1), match.end(1))
             named_ref_value_re = re.compile(
                 r"^@0x[0-9A-Fa-f]+\s+ref\s+[^\n=]+\s=\s(?![-+]?(?:0x[0-9A-Fa-f]+|\d+)\s*$)(.+)$",
                 re.MULTILINE,
             )
             for match in named_ref_value_re.finditer(text):
-                self.output_text.tag_add("syntax_value_string", f"{start_index}+{match.start(1)}c", f"{start_index}+{match.end(1)}c")
+                add_range("syntax_value_string", match.start(1), match.end(1))
             asset_value_re = re.compile(
                 r"^@0x[0-9A-Fa-f]+\s+[A-Za-z0-9_\[\]xXa-fA-F]+\s+[^\n=]+\s=\s.*?"
-                r"((?:[A-Za-z0-9_./-]+[ \t]+)*[A-Za-z0-9_./-]+\.(?:edf|prx|pvm|pwk|bsf|txt|xfg|ifc))\b",
+                r"((?:[A-Za-z0-9_./-]+[ \t]+)*[A-Za-z0-9_./-]+\.(?:edf|prx|pvm|pwk|bsf|txt|xfg|ifc|ifl))\b",
                 re.IGNORECASE | re.MULTILINE,
             )
             for match in asset_value_re.finditer(text):
-                self.output_text.tag_add("syntax_asset", f"{start_index}+{match.start(1)}c", f"{start_index}+{match.end(1)}c")
-            compact_value_re = re.compile(
-                r"^[ \t]*(?:(?:float|int|int_alt|string)\s+)?[^=\n]+=\s*(?![-+]?(?:0x[0-9A-Fa-f]+|\d+(?:\.\d*)?|\.\d+)(?:[eE][-+]?\d+)?\s*(?:#.*)?$)([^#\n]*\S)",
-                re.MULTILINE,
-            )
-            for match in compact_value_re.finditer(text):
-                self.output_text.tag_add("syntax_value_string", f"{start_index}+{match.start(1)}c", f"{start_index}+{match.end(1)}c")
-                asset_match = re.search(
-                    r"((?:[A-Za-z0-9_./-]+[ \t]+)*[A-Za-z0-9_./-]+\.(?:edf|prx|pvm|pwk|bsf|txt|xfg|ifc))\b",
-                    match.group(1),
-                    re.IGNORECASE,
+                add_range("syntax_asset", match.start(1), match.end(1))
+            if self.text_mode == "prx":
+                property_set_re = re.compile(r"^[ \t]*(property_set)\s+([^\s{]+)", re.MULTILINE)
+                for match in property_set_re.finditer(text):
+                    add_range("syntax_keyword", match.start(1), match.end(1))
+                    add_range("syntax_root", match.start(2), match.end(2))
+
+                property_re = re.compile(
+                    r"^[ \t]*(float|int|string)\s+(.+?\S)\s*=\s*(.*?)\s*;[ \t]*$",
+                    re.MULTILINE,
                 )
-                if asset_match:
-                    asset_start = match.start(1) + asset_match.start(1)
-                    asset_end = match.start(1) + asset_match.end(1)
-                    self.output_text.tag_add("syntax_asset", f"{start_index}+{asset_start}c", f"{start_index}+{asset_end}c")
+                for match in property_re.finditer(text):
+                    add_range("syntax_type", match.start(1), match.end(1))
+                    add_range("syntax_member", match.start(2), match.end(2))
+                    if match.group(1) == "string":
+                        add_range("syntax_string", match.start(3), match.end(3))
+
+                reference_re = re.compile(
+                    r"^[ \t]*(ref)\s+(.+?\S)\s*(->)\s*([^;\n]*?\S)\s*;",
+                    re.MULTILINE,
+                )
+                for match in reference_re.finditer(text):
+                    add_range("syntax_type", match.start(1), match.end(1))
+                    add_range("syntax_member", match.start(2), match.end(2))
+                    add_range("syntax_operator", match.start(3), match.end(3))
+                    add_range("syntax_reference", match.start(4), match.end(4))
+            else:
+                compact_value_re = re.compile(
+                    r"^[ \t]*(?:(?:float|int|int_alt|string)\s+)?[^=\n]+=\s*(?![-+]?(?:0x[0-9A-Fa-f]+|\d+(?:\.\d*)?|\.\d+)(?:[eE][-+]?\d+)?\s*(?:#.*)?$)([^#\n]*\S)",
+                    re.MULTILINE,
+                )
+                for match in compact_value_re.finditer(text):
+                    add_range("syntax_value_string", match.start(1), match.end(1))
+                    asset_match = re.search(
+                        r"((?:[A-Za-z0-9_./-]+[ \t]+)*[A-Za-z0-9_./-]+\.(?:edf|prx|pvm|pwk|bsf|txt|xfg|ifc|ifl))\b",
+                        match.group(1),
+                        re.IGNORECASE,
+                    )
+                    if asset_match:
+                        asset_start = match.start(1) + asset_match.start(1)
+                        asset_end = match.start(1) + asset_match.end(1)
+                        add_range("syntax_asset", asset_start, asset_end)
             root_re = re.compile(r"^@?0x[0-9A-Fa-f]+\s+([^\n]+)$", re.MULTILINE)
             for match in root_re.finditer(text):
-                self.output_text.tag_add("syntax_root", f"{start_index}+{match.start(1)}c", f"{start_index}+{match.end(1)}c")
-        self.output_text.tag_raise("syntax_comment")
-        self.output_text.tag_raise("syntax_string")
-        self.output_text.tag_raise("syntax_root")
-        self.output_text.tag_raise("syntax_member")
-        self.output_text.tag_raise("syntax_row_type")
-        self.output_text.tag_raise("syntax_number")
-        self.output_text.tag_raise("syntax_offset")
-        self.output_text.tag_raise("syntax_value_string")
-        self.output_text.tag_raise("syntax_asset")
-        self.output_text.tag_raise("root_table_header")
-        self.output_text.tag_raise("find_match")
+                add_range("syntax_root", match.start(1), match.end(1))
+                if self.text_mode == "prx":
+                    dot_index = match.group(1).rfind(".")
+                    if dot_index > 0:
+                        add_range("syntax_member", match.start(1) + dot_index + 1, match.end(1))
+
+        if self.text_mode == "char_data" and self.monster_data_disassembly_active:
+            self._highlight_monsterdata_disassembly(text, add_range)
+
+        if self.text_mode == "pvm":
+            module_re = re.compile(r"^[ \t]*(module)\s+([A-Za-z_][A-Za-z0-9_]*)", re.MULTILINE)
+            for match in module_re.finditer(text):
+                add_range("syntax_block", match.start(1), match.end(1))
+                add_range("syntax_root", match.start(2), match.end(2))
+
+            block_name_re = re.compile(r"^[ \t]*(globals|code)\b", re.MULTILINE)
+            for match in block_name_re.finditer(text):
+                add_range("syntax_block", match.start(1), match.end(1))
+
+            identifier_re = re.compile(r"\b[A-Za-z_][A-Za-z0-9_]*\b")
+            for match in identifier_re.finditer(text):
+                add_range("syntax_variable", match.start(), match.end())
+
+            function_decl_re = re.compile(
+                r"^[ \t]*(function)\s+([A-Za-z_][A-Za-z0-9_]*)\s*\(([^)]*)\)",
+                re.MULTILINE,
+            )
+            for match in function_decl_re.finditer(text):
+                add_range("syntax_keyword", match.start(1), match.end(1))
+                add_range("syntax_function", match.start(2), match.end(2))
+                parameter_text = match.group(3)
+                parameter_base = match.start(3)
+                for part in re.finditer(r"[^,]+", parameter_text):
+                    names = list(re.finditer(r"[A-Za-z_][A-Za-z0-9_]*", part.group(0)))
+                    if not names:
+                        continue
+                    name = names[-1]
+                    add_range(
+                        "syntax_parameter",
+                        parameter_base + part.start() + name.start(),
+                        parameter_base + part.start() + name.end(),
+                    )
+
+            declaration_re = re.compile(
+                r"^[ \t]*(?:(extern)\s+)?([A-Za-z_][A-Za-z0-9_]*(?:-ref|\[\]\d+)?)\s+([A-Za-z_][A-Za-z0-9_]*)\s*;",
+                re.MULTILINE,
+            )
+            for match in declaration_re.finditer(text):
+                if match.group(1):
+                    add_range("syntax_keyword", match.start(1), match.end(1))
+                add_range("syntax_type", match.start(2), match.end(2))
+                add_range("syntax_variable", match.start(3), match.end(3))
+
+            call_re = re.compile(r"\b([A-Za-z_][A-Za-z0-9_]*)\s*(?=\()")
+            control_words = {"if", "else", "for", "while", "switch", "return", "function"}
+            close_levels = {}
+
+            def matching_paren(open_index):
+                depth = 0
+                quote = None
+                escaped = False
+                for cursor in range(open_index, len(text)):
+                    char = text[cursor]
+                    if quote is not None:
+                        if escaped:
+                            escaped = False
+                        elif char == "\\":
+                            escaped = True
+                        elif char == quote:
+                            quote = None
+                        continue
+                    if char in {"'", '"'}:
+                        quote = char
+                    elif char == "(":
+                        depth += 1
+                    elif char == ")":
+                        depth -= 1
+                        if depth == 0:
+                            return cursor
+                return None
+
+            for match in call_re.finditer(text):
+                if match.group(1) in control_words:
+                    continue
+                level = 0
+                if match.start(1) > 0 and text[match.start(1) - 1] == ".":
+                    receiver_end = match.start(1) - 2
+                    while receiver_end >= 0 and text[receiver_end].isspace():
+                        receiver_end -= 1
+                    if receiver_end >= 0 and text[receiver_end] == ")":
+                        level = (close_levels.get(receiver_end, 0) + 1) % 3
+                    else:
+                        receiver_match = re.search(r"([A-Za-z_][A-Za-z0-9_]*)\s*$", text[:receiver_end + 1])
+                        if receiver_match and re.match(r"g[A-Z]", receiver_match.group(1)):
+                            level = 1
+                tag = ("syntax_function", "syntax_method", "syntax_method_deep")[level]
+                add_range(tag, match.start(1), match.end(1))
+                open_index = text.find("(", match.end(1))
+                if open_index >= 0:
+                    close_index = matching_paren(open_index)
+                    if close_index is not None:
+                        close_levels[close_index] = level
+
+            global_re = re.compile(r"\bg[A-Z][A-Za-z0-9_]*\b")
+            for match in global_re.finditer(text):
+                add_range("syntax_root", match.start(), match.end())
+
+            pvm_operator_re = re.compile(r"->|==|!=|<=|>=|\+\+|--|&&|\|\||[+\-*/%<>=!&|]")
+            for match in pvm_operator_re.finditer(text):
+                add_range("syntax_operator", match.start(), match.end())
+
+        # Tk accepts any number of index pairs in one tag command. Batching here
+        # avoids one Python/Tcl round trip for every token in large exports.
+        for tag, indices in tag_ranges.items():
+            for offset in range(0, len(indices), 400):
+                batch = indices[offset:offset + 400]
+                self.output_text.tk.call(self.output_text._w, "tag", "add", tag, *batch)
+
+    def open_bundle_search(self):
+        if not self.parser or not self.parsed_files:
+            messagebox.showinfo("Bundle Search", "Open a bundle before searching.")
+            return
+        if self.bundle_search_window and self.bundle_search_window.winfo_exists():
+            self.bundle_search_window.deiconify()
+            self.bundle_search_window.lift()
+            return
+
+        window = tk.Toplevel(self.root)
+        window.title("Bundle Search")
+        window.geometry("720x430")
+        window.transient(self.root)
+        self.bundle_search_window = window
+        frame = ttk.Frame(window, padding=10)
+        frame.pack(fill=tk.BOTH, expand=True)
+        query_var = tk.StringVar()
+        query_entry = ttk.Entry(frame, textvariable=query_var)
+        query_entry.pack(fill=tk.X)
+        status_var = tk.StringVar(value="Searches entry names and embedded text across the current bundle.")
+        ttk.Label(frame, textvariable=status_var).pack(fill=tk.X, pady=(5, 5))
+        results = tk.Listbox(
+            frame,
+            activestyle="dotbox",
+            bg=APP_TEXT_BG,
+            fg=APP_TEXT_FG,
+            selectbackground=APP_TEXT_SELECT_BG,
+            selectforeground=APP_TEXT_SELECT_FG,
+        )
+        scrollbar = ttk.Scrollbar(frame, orient=tk.VERTICAL, command=results.yview)
+        results.configure(yscrollcommand=scrollbar.set)
+        results.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
+
+        def close_window():
+            self.bundle_search_generation += 1
+            self.bundle_search_window = None
+            window.destroy()
+
+        def run_search(_event=None):
+            query = query_var.get().strip()
+            if not query:
+                return
+            self.bundle_search_generation += 1
+            generation = self.bundle_search_generation
+            results.delete(0, tk.END)
+            status_var.set("Searching in the background...")
+            parser = self.parser
+            entries = [dict(entry) for entry in self.parsed_files]
+            query_folded = query.casefold()
+
+            def worker():
+                found = []
+                for entry in entries:
+                    name = str(entry.get("name", ""))
+                    if query_folded in name.casefold():
+                        found.append((entry, query, f"Name: {name}"))
+                    try:
+                        blob = parser.read_bytes(entry.get("offset", 0), entry.get("size", 0))
+                    except Exception:
+                        continue
+                    # Latin-1 keeps a one-to-one byte mapping while still exposing embedded ASCII.
+                    text = bytes(blob).decode("latin-1", errors="ignore")
+                    position = text.casefold().find(query_folded)
+                    if position >= 0:
+                        start = max(0, position - 35)
+                        end = min(len(text), position + len(query) + 55)
+                        context = "".join(ch if 32 <= ord(ch) < 127 else " " for ch in text[start:end])
+                        context = re.sub(r"\s+", " ", context).strip()
+                        found.append((entry, query, f"@0x{position:X}: {context}"))
+
+                def finish():
+                    if generation != self.bundle_search_generation or not window.winfo_exists():
+                        return
+                    self.bundle_search_results = found
+                    for entry, _term, context in found:
+                        results.insert(tk.END, f"{entry.get('name', '')}    {context}")
+                    status_var.set(f"{len(found)} result(s). Double-click to open.")
+                self.root.after(0, finish)
+
+            threading.Thread(target=worker, daemon=True).start()
+
+        def open_result(_event=None):
+            selection = results.curselection()
+            if not selection:
+                return
+            entry, term, _context = self.bundle_search_results[selection[0]]
+            if self._is_editable_bundle_entry(entry):
+                self.open_bundle_entry_editor(entry)
+                self._schedule_bundle_search_jump(entry, term)
+            elif self._is_texture_preview_entry(entry):
+                self.open_texture_preview(entry)
+            elif self._is_static_mesh_entry(entry):
+                self.open_static_mesh_preview(entry)
+            else:
+                messagebox.showinfo("Bundle Search", "This result is in a binary entry without an editor yet.")
+
+        query_entry.bind("<Return>", run_search)
+        results.bind("<Double-Button-1>", open_result)
+        results.bind("<Return>", open_result)
+        window.protocol("WM_DELETE_WINDOW", close_window)
+        query_entry.focus_set()
+
+    def _schedule_bundle_search_jump(self, entry, term, attempts=40):
+        def jump(remaining):
+            current = self.bundle_entry_edit.get("entry", {}) if self.bundle_entry_edit else {}
+            same_entry = (
+                current.get("file_num") == entry.get("file_num")
+                and current.get("offset") == entry.get("offset")
+            )
+            if same_entry and self.text_mode and not self.loading_text_editor:
+                self.find_var.set(term)
+                self.output_text.mark_set(tk.INSERT, "1.0")
+                self.find_next_in_editor()
+                return
+            if remaining > 0:
+                self.root.after(100, lambda: jump(remaining - 1))
+        jump(attempts)
 
     def open_find_dialog(self):
         self.show_find_bar()
 
     def _position_find_bar(self):
         self.root.update_idletasks()
-        parent = self.find_frame.master
-        self.find_frame.place(relx=1.0, x=-20, y=4, anchor=tk.NE)
+        self.find_frame.place(relx=1.0, x=-24, y=3, anchor=tk.NE)
         self.find_frame.lift()
 
     def show_find_bar(self):
@@ -8335,6 +9580,16 @@ class PipeworksGUI:
         self.output_text.tag_remove("find_match", "1.0", tk.END)
         self.find_frame.place_forget()
         self.output_text.focus_set()
+
+    def clear_find_bar(self):
+        self.find_var.set("")
+        self.output_text.tag_remove("find_match", "1.0", tk.END)
+        self.output_text.focus_set()
+
+    def _hide_find_bar_completely(self):
+        self.find_var.set("")
+        self.output_text.tag_remove("find_match", "1.0", tk.END)
+        self.find_frame.place_forget()
 
     def find_next_in_editor(self):
         query = self.find_var.get()
@@ -8403,6 +9658,15 @@ class PipeworksGUI:
             else:
                 return
 
+            if (
+                self.texture_preview_session
+                and self.texture_preview_entry
+                and os.path.isfile(filepath)
+                and filepath.lower().endswith('.png')
+            ):
+                self._replace_texture_preview_png_from_path(filepath)
+                return
+
             # Accept a directory drop or a direct bundle drop
             if os.path.isdir(filepath):
                 self.file_path_var.set(filepath)
@@ -8441,9 +9705,11 @@ class PipeworksGUI:
                 ("PWK VM Scripts", "*.pvm"),
                 ("PRX Scripts", "*.prx"),
                 ("EDF Particles", "*.edf"),
+                ("LOC Localization", "*.loc"),
                 ("VOL Bundles", "*.vol"),
                 ("Text Scripts", "*.txt"),
                 ("IFC Files", "*.ifc"),
+                ("IFL Files", "*.ifl"),
                 ("XFG Files", "*.xfg"),
                 ("CCG Bundles", "*.ccg"),
                 ("CMF Bundles", "*.cmf"),
@@ -8513,6 +9779,8 @@ class PipeworksGUI:
         self.parsed_files = []
         self.text_mode = None
         self.text_source_path = None
+        self._hide_find_bar_completely()
+        self.show_find_bar()
         self.bundle_entry_session = None
         self.extract_btn.config(text="Extract")
         self.rebuild_btn.config(text="Rebuild")
@@ -8605,6 +9873,9 @@ class PipeworksGUI:
         if self.texture_preview_session:
             self.on_texture_preview_selected(event)
             return
+        if self.static_mesh_preview_session:
+            self.on_static_mesh_preview_selected(event)
+            return
         if self.bundle_entry_session:
             self.on_bundle_entry_selected(event)
             return
@@ -8674,7 +9945,7 @@ class PipeworksGUI:
                 self.load_text_editor_file(filepath, ext)
                 return
 
-        if ext in ('.bsf', '.txt', '.ifc', '.xfg', '.prx', '.edf'):
+        if ext in ('.bsf', '.txt', '.ifc', '.ifl', '.xfg', '.prx', '.edf', '.loc'):
             self.load_text_editor_file(filepath, ext)
             return
 
@@ -8682,17 +9953,27 @@ class PipeworksGUI:
         self.text_mode = None
         self.text_source_path = None
         self.bundle_entry_edit = None
+        self._hide_find_bar_completely()
+        self.show_find_bar()
         self.texture_preview_session = None
         self.texture_preview_entry = None
         self.texture_preview_image = None
+        self.static_mesh_preview_session = None
+        self.static_mesh_preview_entry = None
+        self.static_mesh_export_parts = []
+        if self.static_mesh_preview_viewer:
+            self.static_mesh_preview_viewer.destroy()
+        self.static_mesh_preview_viewer = None
         if not self.bundle_entry_session and not self.bundle_files:
             self.bundle_label.config(text="Bundle:")
             self.bundle_label.grid()
             self.bundle_dropdown.grid()
             self.hide_editor_back_button()
             self.bundle_select_frame.grid_remove()
-        self.extract_btn.config(text="Extract")
+        self.extract_btn.config(text="Extract", command=self.extract_files)
         self.rebuild_btn.config(text="Rebuild")
+        if not self.rebuild_btn.winfo_manager():
+            self.rebuild_btn.pack(side=tk.LEFT, padx=(0, 5), before=self.build_btn)
         self._clear_editor_diff_marks()
 
         # Clear output
@@ -8727,7 +10008,7 @@ class PipeworksGUI:
             self.parsed_files = results
 
             # Header
-            header = f"{'Name ID':<8} {'File #':<8} {'File Name':<40} {'Offset':<12} {'Size':<12}\n"
+            header = f"{'NameID':<8} {'File #':<8} {'File Name':<40} {'Offset':<12} {'Size':<12}\n"
             separator = "-" * 90 + "\n"
             self.output_text.insert(tk.END, header)
             self.output_text.insert(tk.END, separator)
@@ -8745,22 +10026,31 @@ class PipeworksGUI:
                 self.output_text.insert(tk.END, row)
                 if self._is_editable_bundle_entry(entry):
                     name_start = f"{row_start}+18c"
-                    name_end = f"{name_start}+{min(len(name), 40)}c"
+                    name_end = f"{name_start}+{len(name)}c"
                     tag = f"bundle_entry_link_{file_num}"
                     self.output_text.tag_add(tag, name_start, name_end)
-                    self.output_text.tag_configure(tag, foreground="#64b5f6", underline=True)
+                    self.output_text.tag_configure(tag, foreground=self._bundle_entry_link_color(entry), underline=True)
                     self.output_text.tag_bind(tag, "<Enter>", lambda _event: self.output_text.config(cursor="hand2"))
                     self.output_text.tag_bind(tag, "<Leave>", lambda _event: self.output_text.config(cursor=""))
                     self.output_text.tag_bind(tag, "<Button-1>", lambda _event, e=entry: self.open_bundle_entry_editor(e))
                 elif self._is_texture_preview_entry(entry):
                     name_start = f"{row_start}+18c"
-                    name_end = f"{name_start}+{min(len(name), 40)}c"
+                    name_end = f"{name_start}+{len(name)}c"
                     tag = f"texture_entry_link_{file_num}_{entry.get('raw_offset', 0)}"
                     self.output_text.tag_add(tag, name_start, name_end)
-                    self.output_text.tag_configure(tag, foreground="#64b5f6", underline=True)
+                    self.output_text.tag_configure(tag, foreground=self._bundle_entry_link_color(entry), underline=True)
                     self.output_text.tag_bind(tag, "<Enter>", lambda _event: self.output_text.config(cursor="hand2"))
                     self.output_text.tag_bind(tag, "<Leave>", lambda _event: self.output_text.config(cursor=""))
                     self.output_text.tag_bind(tag, "<Button-1>", lambda _event, e=entry: self.open_texture_preview(e))
+                elif self._is_static_mesh_entry(entry):
+                    name_start = f"{row_start}+18c"
+                    name_end = f"{name_start}+{len(name)}c"
+                    tag = f"static_mesh_link_{file_num}_{entry.get('raw_offset', 0)}"
+                    self.output_text.tag_add(tag, name_start, name_end)
+                    self.output_text.tag_configure(tag, foreground=self._bundle_entry_link_color(entry), underline=True)
+                    self.output_text.tag_bind(tag, "<Enter>", lambda _event: self.output_text.config(cursor="hand2"))
+                    self.output_text.tag_bind(tag, "<Leave>", lambda _event: self.output_text.config(cursor=""))
+                    self.output_text.tag_bind(tag, "<Button-1>", lambda _event, e=entry: self.open_static_mesh_preview(e))
 
             self.output_text.insert(tk.END, "\n")
             self.output_text.insert(tk.END, f"Total entries: {len(results)}\n")
@@ -8770,6 +10060,8 @@ class PipeworksGUI:
             self.rebuild_btn.config(state=tk.NORMAL)
 
     def _is_editable_bundle_entry(self, entry):
+        if self._is_palette_entry(entry):
+            return True
         if entry.get('is_resource'):
             return False
         name = str(entry.get('name', '')).replace('\\', '/')
@@ -8779,7 +10071,162 @@ class PipeworksGUI:
             or self._is_character_data_entry(entry)
             or self._is_level_data_entry(entry)
             or self._is_skeleton_type3_entry(entry)
+            or self._is_camera_path_entry(entry)
+            or self._is_fdf_entry(entry)
+            or self._is_material_entry(entry)
         )
+
+    def _is_material_entry(self, entry):
+        return bool(
+            HAS_MATERIAL_TEXT_TOOL
+            and not entry.get('is_resource')
+            and entry.get('file_type') == 6
+            and entry.get('size', 0) >= 0x38
+        )
+
+    def _is_palette_entry(self, entry):
+        return bool(
+            HAS_PALETTE_TEXT_TOOL
+            and entry.get('is_resource')
+            and entry.get('file_type') == 13
+            and entry.get('size', 0) >= 64
+        )
+
+    def _is_static_mesh_entry(self, entry):
+        basic_match = bool(
+            HAS_STATIC_MESH_VIEWER
+            and not entry.get('is_resource')
+            and entry.get('file_type') == 0
+            and entry.get('size', 0) > 0
+        )
+        if not basic_match or not self.parser:
+            return False
+        if Path(str(getattr(self.parser, 'filepath', ''))).suffix.lower() in {'.cmg', '.cmf', '.ccf'}:
+            return False
+        entry_basename = Path(str(entry.get('name', '')).replace('\\', '/')).name
+        if (
+            not self.parser.is_big_endian
+            and re.search(r'(?:^|_)bip\d*(?:_|$)', entry_basename, re.IGNORECASE)
+        ):
+            return False
+        resource_entry = next(
+            (
+                candidate
+                for candidate in self.parsed_files
+                if candidate.get('is_resource')
+                and candidate.get('file_type') == 0
+                and candidate.get('file_num') == entry.get('file_num')
+                and candidate.get('size', 0) > 0
+            ),
+            None,
+        )
+        if resource_entry is None:
+            return False
+        data_size = len(getattr(self.parser, 'file_data', b'') or b'')
+        for item in (entry, resource_entry):
+            offset = int(item.get('offset', -1))
+            size = int(item.get('size', 0))
+            if offset < 0 or size <= 0 or offset + size > data_size:
+                return False
+        try:
+            entry_index = next(index for index, item in enumerate(self.parsed_files) if (
+                item is entry or (
+                    item.get('file_num') == entry.get('file_num')
+                    and not item.get('is_resource')
+                    and item.get('file_type') == 0
+                )
+            ))
+        except StopIteration:
+            return False
+        index = entry_index - 1
+        while index >= 0 and self.parsed_files[index].get('is_resource'):
+            index -= 1
+        is_run_root = index < 0 or self.parsed_files[index].get('file_type') != 0
+        if not is_run_root:
+            return False
+
+        hierarchy_name = self._static_mesh_hierarchy_name_for_entry(entry)
+        directional_match = re.match(r'^(.*)_(?:FRONT|BACK)$', hierarchy_name, re.IGNORECASE)
+        if directional_match:
+            base_hierarchy = directional_match.group(1).lower()
+            if any(
+                not candidate.get('is_resource')
+                and candidate.get('file_type') == 0
+                and candidate.get('file_num') != entry.get('file_num')
+                and self._static_mesh_hierarchy_name_for_entry(candidate).lower() == base_hierarchy
+                for candidate in self.parsed_files
+            ):
+                return False
+        return True
+
+    def _is_camera_path_entry(self, entry):
+        return not entry.get('is_resource') and entry.get('file_type') == 21
+
+    def _is_fdf_entry(self, entry):
+        if entry.get('is_resource'):
+            return False
+        name = str(entry.get('name', '')).replace('\\', '/').lower()
+        return name.endswith('.fdf')
+
+    def _bundle_entry_link_color(self, entry):
+        if APP_THEME_MODE == "dark":
+            colors = {
+                "texture": "#4ade80",
+                "data": "#c084fc",
+                "script": "#fb7185",
+                "effect": "#fb923c",
+                "mesh": "#facc15",
+                "default": "#64b5f6",
+            }
+        else:
+            colors = {
+                "texture": "#15803d",
+                "data": "#7e22ce",
+                "script": "#be123c",
+                "effect": "#c2410c",
+                "mesh": "#a16207",
+                "default": "#1d4ed8",
+            }
+
+        if self._is_texture_preview_entry(entry) or self._is_palette_entry(entry):
+            return colors["texture"]
+        if self._is_static_mesh_entry(entry):
+            return colors["mesh"]
+        if self._is_material_entry(entry):
+            return colors["default"]
+        if (
+            self._is_character_data_entry(entry)
+            or self._is_level_data_entry(entry)
+            or self._is_skeleton_type3_entry(entry)
+            or self._is_camera_path_entry(entry)
+            or self._is_fdf_entry(entry)
+        ):
+            return colors["data"]
+
+        name = str(entry.get('name', '')).replace('\\', '/').lower()
+        if name.endswith(('.prx', '.loc', '.bsf', '.ifc', '.ifl')):
+            return colors["script"]
+        if name.endswith('.edf'):
+            return colors["effect"]
+        return colors["default"]
+
+    def _refresh_bundle_entry_link_colors(self):
+        for entry in getattr(self, "parsed_files", []) or []:
+            file_num = entry.get('file_num')
+            if self._is_editable_bundle_entry(entry):
+                tag = f"bundle_entry_link_{file_num}"
+            elif self._is_texture_preview_entry(entry):
+                tag = f"texture_entry_link_{file_num}_{entry.get('raw_offset', 0)}"
+            elif self._is_static_mesh_entry(entry):
+                tag = f"static_mesh_link_{file_num}_{entry.get('raw_offset', 0)}"
+            else:
+                continue
+            try:
+                self.output_text.tag_configure(
+                    tag, foreground=self._bundle_entry_link_color(entry)
+                )
+            except Exception:
+                pass
 
     def _is_skeleton_type3_entry(self, entry):
         if entry.get('is_resource') or not HAS_SKELETON_TYPE3_TOOL:
@@ -8838,6 +10285,1193 @@ class PipeworksGUI:
             and entry.get('file_type') == 9
             and entry.get('size', 0) > 0
         )
+
+    def open_static_mesh_preview(self, entry):
+        if not self.parser or not self._is_static_mesh_entry(entry):
+            return
+        resource_entry = next(
+            (
+                candidate
+                for candidate in self.parsed_files
+                if candidate.get('is_resource')
+                and candidate.get('file_type') == 0
+                and candidate.get('file_num') == entry.get('file_num')
+                and candidate.get('size', 0) > 0
+            ),
+            None,
+        )
+        if resource_entry is None:
+            messagebox.showerror("Static Mesh Preview", "This type-0 entry has no paired resource data.", parent=self.root)
+            return
+        try:
+            main_data = bytes(self.parser.read_bytes(entry['offset'], entry['size']))
+            resource_data = bytes(self.parser.read_bytes(resource_entry['offset'], resource_entry['size']))
+            if self.static_mesh_preview_viewer:
+                self.static_mesh_preview_viewer.destroy()
+            if not self.static_mesh_preview_session:
+                self.static_mesh_preview_session = {
+                    "bundle_path": self.parser.filepath,
+                    "entries": [dict(item) for item in self.parsed_files if self._is_static_mesh_entry(item)],
+                    "return_context": self._bundle_editor_return_context(self.parser.filepath),
+                }
+            self.static_mesh_preview_entry = dict(entry)
+            self.text_mode = None
+            self.text_source_path = None
+            self.bundle_entry_edit = None
+            self._hide_find_bar_completely()
+            self._setup_static_mesh_preview_selector(entry)
+            self.extract_btn.config(text="Export", command=self.export_static_mesh_preview, state=tk.NORMAL)
+            self.rebuild_btn.pack_forget()
+            self.output_text.config(state=tk.NORMAL)
+            self.output_text.delete(1.0, tk.END)
+            self.output_text.edit_reset()
+            self.output_text.edit_modified(False)
+            self._clear_editor_diff_marks()
+            display_name = str(entry.get('name', 'type-0 mesh')).replace('\\', '/')
+            self.output_text.insert(
+                tk.END,
+                f"Static mesh: {display_name}\n"
+                "[Some Objects may not be handled correctly yet]\n\n",
+            )
+            connected_group = [entry] + self._static_mesh_connected_entries(entry)
+            part_transforms = {}
+            ordered_parts = sorted(
+                connected_group,
+                key=lambda part: next((index for index, item in enumerate(self.parsed_files) if (
+                    not item.get('is_resource') and item.get('file_type') == 0
+                    and item.get('file_num') == part.get('file_num')
+                )), len(self.parsed_files)),
+            )
+            native_runs = []
+            for part in ordered_parts:
+                if not native_runs:
+                    native_runs.append([part])
+                    continue
+                previous = native_runs[-1][-1]
+                previous_index = next(index for index, item in enumerate(self.parsed_files) if (
+                    not item.get('is_resource') and item.get('file_type') == 0
+                    and item.get('file_num') == previous.get('file_num')
+                ))
+                part_index = next(index for index, item in enumerate(self.parsed_files) if (
+                    not item.get('is_resource') and item.get('file_type') == 0
+                    and item.get('file_num') == part.get('file_num')
+                ))
+                separators = [
+                    item for item in self.parsed_files[previous_index + 1:part_index]
+                    if not item.get('is_resource') and item.get('file_type') != 0
+                ]
+                if separators:
+                    native_runs.append([part])
+                else:
+                    native_runs[-1].append(part)
+            for native_run in native_runs:
+                part_transforms.update(self._static_mesh_part_transforms(native_run))
+            hierarchy_name = self._static_mesh_hierarchy_name_for_entry(entry).lower()
+            if hierarchy_name == 'super_maser_tank':
+                rear_part = next((
+                    part for part in connected_group
+                    if Path(str(part.get('name', '')).replace('\\', '/')).name.lower().endswith('super_maser_tank_back')
+                ), None)
+                front_part = next((
+                    part for part in connected_group
+                    if Path(str(part.get('name', '')).replace('\\', '/')).name.lower().endswith('super_maser_tank_front')
+                ), None)
+
+                def mesh_y_bounds(part):
+                    if part is None:
+                        return None
+                    resource = next((
+                        candidate for candidate in self.parsed_files
+                        if candidate.get('is_resource')
+                        and candidate.get('file_type') == 0
+                        and candidate.get('file_num') == part.get('file_num')
+                    ), None)
+                    if resource is None:
+                        return None
+                    mesh = STATIC_MESH_VIEWER.decode_static_mesh(
+                        bytes(self.parser.read_bytes(part['offset'], part['size'])),
+                        bytes(self.parser.read_bytes(resource['offset'], resource['size'])),
+                        bool(self.parser.is_big_endian),
+                        gx_variant=self._static_mesh_gx_variant(),
+                    )
+                    values = [vertex[1] for vertex in mesh.vertices]
+                    return (min(values), max(values)) if values else None
+
+                rear_bounds = mesh_y_bounds(rear_part)
+                front_bounds = mesh_y_bounds(front_part)
+                if rear_bounds and front_bounds:
+                    front_offset = rear_bounds[1] - front_bounds[0]
+                    attachment = [
+                        [1.0, 0.0, 0.0, 0.0],
+                        [0.0, 1.0, 0.0, front_offset],
+                        [0.0, 0.0, 1.0, 0.0],
+                        [0.0, 0.0, 0.0, 1.0],
+                    ]
+                    identity = [
+                        [1.0, 0.0, 0.0, 0.0],
+                        [0.0, 1.0, 0.0, 0.0],
+                        [0.0, 0.0, 1.0, 0.0],
+                        [0.0, 0.0, 0.0, 1.0],
+                    ]
+                    for part in connected_group:
+                        if self._static_mesh_hierarchy_name_for_entry(part).lower() == 'super_maser_tank_front':
+                            file_num = part.get('file_num')
+                            part_transforms[file_num] = self._static_mesh_matrix_multiply(
+                                attachment, part_transforms.get(file_num, identity)
+                            )
+            part_textures = {part.get('file_num'): self._static_mesh_texture_for_entry(part) for part in connected_group}
+            self.static_mesh_export_parts = []
+            for part in connected_group:
+                part_resource = next((
+                    candidate for candidate in self.parsed_files
+                    if candidate.get('is_resource')
+                    and candidate.get('file_type') == 0
+                    and candidate.get('file_num') == part.get('file_num')
+                    and candidate.get('size', 0) > 0
+                ), None)
+                if part_resource is None:
+                    continue
+                self.static_mesh_export_parts.append({
+                    'name': Path(str(part.get('name', 'mesh')).replace('\\', '/')).name,
+                    'main': bytes(self.parser.read_bytes(part['offset'], part['size'])),
+                    'resource': bytes(self.parser.read_bytes(part_resource['offset'], part_resource['size'])),
+                    'transform': part_transforms.get(part.get('file_num')),
+                    'materials': part_textures.get(part.get('file_num')),
+                })
+            connected_parts = []
+            for part_entry in connected_group:
+                if part_entry.get('file_num') == entry.get('file_num'):
+                    continue
+                part_resource = next(
+                    (
+                        candidate for candidate in self.parsed_files
+                        if candidate.get('is_resource')
+                        and candidate.get('file_type') == 0
+                        and candidate.get('file_num') == part_entry.get('file_num')
+                        and candidate.get('size', 0) > 0
+                    ),
+                    None,
+                )
+                if part_resource is not None:
+                    connected_parts.append((
+                        bytes(self.parser.read_bytes(part_entry['offset'], part_entry['size'])),
+                        bytes(self.parser.read_bytes(part_resource['offset'], part_resource['size'])),
+                        part_transforms.get(part_entry.get('file_num')),
+                        part_textures.get(part_entry.get('file_num')),
+                    ))
+            self.static_mesh_preview_viewer = STATIC_MESH_VIEWER.embed_viewer(
+                self.output_text,
+                main_data,
+                resource_data,
+                bool(self.parser.is_big_endian),
+                palette=THEME_PALETTES.get(APP_THEME_MODE, THEME_PALETTES['dark']),
+                connected_parts=connected_parts,
+                mesh_transform=part_transforms.get(entry.get('file_num')),
+                texture=part_textures.get(entry.get('file_num')),
+                gx_variant=self._static_mesh_gx_variant(),
+            )
+        except Exception as exc:
+            messagebox.showerror("Static Mesh Preview", str(exc), parent=self.root)
+
+    @staticmethod
+    def _static_mesh_export_name(value, fallback='mesh'):
+        cleaned = re.sub(r'[^A-Za-z0-9_.-]+', '_', str(value)).strip('._')
+        return cleaned or fallback
+
+    def export_static_mesh_preview(self):
+        parts = list(getattr(self, 'static_mesh_export_parts', []) or [])
+        if not parts:
+            messagebox.showerror("Export Static Mesh", "No preview mesh is available to export.", parent=self.root)
+            return
+        parent = filedialog.askdirectory(title="Choose folder for OBJ export", parent=self.root)
+        if not parent:
+            return
+        entry_name = Path(str((self.static_mesh_preview_entry or {}).get('name', 'mesh')).replace('\\', '/')).name
+        export_name = self._static_mesh_export_name(entry_name)
+        export_dir = Path(parent) / export_name
+        export_dir.mkdir(parents=True, exist_ok=True)
+        obj_path = export_dir / f"{export_name}.obj"
+        mtl_path = export_dir / f"{export_name}.mtl"
+
+        obj_lines = [f"mtllib {mtl_path.name}", ""]
+        mtl_lines = []
+        vertex_base = 1
+        uv_base = 1
+        written_materials = set()
+        written_textures = {}
+        used_texture_names = set()
+        for part_index, part in enumerate(parts):
+            mesh = STATIC_MESH_VIEWER.decode_static_mesh(
+                part['main'], part['resource'], bool(self.parser.is_big_endian), part.get('materials'),
+                self._static_mesh_gx_variant(),
+            )
+            mesh = STATIC_MESH_VIEWER.transform_mesh(mesh, part.get('transform'))
+            group_name = self._static_mesh_export_name(part.get('name'), f"part_{part_index + 1}")
+            obj_lines.extend((f"o {group_name}", f"g {group_name}"))
+            # OBJ is Y-up; Blender maps this Y offset onto its Z-up stage height.
+            obj_lines.extend(f"v {x:.9g} {z + 15.0:.9g} {-y:.9g}" for x, y, z in mesh.vertices)
+            if mesh.uvs:
+                obj_lines.extend(f"vt {u:.9g} {1.0 - v:.9g}" for u, v in mesh.uvs)
+
+            active_material = None
+            for face_index, face in enumerate(mesh.faces):
+                material_id = mesh.face_materials[face_index] if mesh.face_materials else None
+                options = part.get('materials') or {}
+                material = options.get(material_id, {}) if isinstance(options, dict) else {}
+                opacity = float(material.get('opacity', 1.0))
+                if opacity <= 0.001:
+                    continue
+                material_key = f"{group_name}_{material_id if material_id is not None else 'default'}"
+                if material_key != active_material:
+                    obj_lines.append(f"usemtl {material_key}")
+                    active_material = material_key
+                if material_key not in written_materials:
+                    mtl_lines.extend((f"newmtl {material_key}", "Kd 1.0 1.0 1.0", f"d {opacity:.6g}"))
+                    image = material.get('image')
+                    if image is not None:
+                        texture_key = id(image)
+                        texture_name = written_textures.get(texture_key)
+                        if texture_name is None:
+                            source_name = material.get('name') or f"texture_{len(written_textures) + 1}"
+                            texture_name = self._static_mesh_export_name(source_name, 'texture') + '.png'
+                            candidate = texture_name
+                            suffix = 2
+                            while candidate in used_texture_names:
+                                candidate = f"{Path(texture_name).stem}_{suffix}.png"
+                                suffix += 1
+                            texture_name = candidate
+                            image.convert('RGBA').save(export_dir / texture_name)
+                            written_textures[texture_key] = texture_name
+                            used_texture_names.add(texture_name)
+                        mtl_lines.append(f"map_Kd {texture_name}")
+                    mtl_lines.append("")
+                    written_materials.add(material_key)
+                uv_face = mesh.uv_faces[face_index] if mesh.uv_faces else face
+                if mesh.uvs:
+                    values = [f"{vertex_base + vertex}/{uv_base + uv}" for vertex, uv in zip(face, uv_face)]
+                else:
+                    values = [str(vertex_base + vertex) for vertex in face]
+                obj_lines.append("f " + " ".join(values))
+            obj_lines.append("")
+            vertex_base += len(mesh.vertices)
+            uv_base += len(mesh.uvs or [])
+
+        obj_path.write_text('\n'.join(obj_lines) + '\n', encoding='utf-8')
+        mtl_path.write_text('\n'.join(mtl_lines) + '\n', encoding='utf-8')
+        messagebox.showinfo(
+            "Export Static Mesh",
+            f"Exported {len(parts)} submesh{'es' if len(parts) != 1 else ''} to:\n{export_dir}",
+            parent=self.root,
+        )
+
+    def _static_mesh_connected_entries(self, selected_entry):
+        """Return adjacent type-0 mains in the same native model part run."""
+        if self._static_mesh_gx_variant() == 'ps2' and PS2_STATIC_MESH is not None:
+            return PS2_STATIC_MESH.connected_entries(self.parsed_files, selected_entry)
+        if self._static_mesh_gx_variant() == 'gamecube' and GAMECUBE_STATIC_MESH is not None:
+            return GAMECUBE_STATIC_MESH.connected_entries(self.parsed_files, selected_entry)
+        try:
+            selected_index = self.parsed_files.index(selected_entry)
+        except ValueError:
+            selected_index = next(
+                (index for index, item in enumerate(self.parsed_files) if (
+                    item.get('file_num') == selected_entry.get('file_num')
+                    and not item.get('is_resource')
+                    and item.get('file_type') == 0
+                )),
+                -1,
+            )
+        if selected_index < 0:
+            return []
+
+        first = selected_index
+        while first > 0:
+            candidate = self.parsed_files[first - 1]
+            if candidate.get('is_resource'):
+                first -= 1
+                continue
+            if candidate.get('file_type') != 0:
+                break
+            first -= 1
+
+        group = []
+        index = first
+        while index < len(self.parsed_files):
+            candidate = self.parsed_files[index]
+            if candidate.get('is_resource'):
+                index += 1
+                continue
+            if candidate.get('file_type') != 0:
+                break
+            group.append(candidate)
+            index += 1
+        selected_hierarchy = self._static_mesh_hierarchy_name_for_entry(selected_entry)
+        family_match = re.match(r'^(.*?)(?:_(?:FRONT|BACK))?$', selected_hierarchy, re.IGNORECASE)
+        family = family_match.group(1).lower() if family_match else selected_hierarchy.lower()
+        has_directional_companion = any(
+            not candidate.get('is_resource') and candidate.get('file_type') == 0
+            and self._static_mesh_hierarchy_name_for_entry(candidate).lower() in {
+                family + '_front', family + '_back'
+            }
+            for candidate in self.parsed_files
+        )
+        directional_group = selected_hierarchy.lower().endswith(('_front', '_back')) or has_directional_companion
+        if directional_group:
+            for candidate in self.parsed_files:
+                if candidate.get('is_resource') or candidate.get('file_type') != 0:
+                    continue
+                candidate_name = Path(str(candidate.get('name', '')).replace('\\', '/')).name.lower()
+                if not candidate_name.startswith(family):
+                    continue
+                hierarchy_name = self._static_mesh_hierarchy_name_for_entry(candidate).lower()
+                if hierarchy_name == family or hierarchy_name in {family + '_front', family + '_back'}:
+                    if not any(item.get('file_num') == candidate.get('file_num') for item in group):
+                        group.append(candidate)
+            allowed_hierarchies = {family, family + '_front', family + '_back'}
+            group = [
+                candidate for candidate in group
+                if Path(str(candidate.get('name', '')).replace('\\', '/')).name.lower().startswith(family)
+                and self._static_mesh_hierarchy_name_for_entry(candidate).lower() in allowed_hierarchies
+            ]
+        return [candidate for candidate in group if candidate.get('file_num') != selected_entry.get('file_num')]
+
+    def _static_mesh_hierarchy_name_for_entry(self, entry):
+        if self._static_mesh_gx_variant() == 'ps2' and PS2_STATIC_MESH is not None:
+            return PS2_STATIC_MESH.owner_name(self.parsed_files, entry)
+        if self._static_mesh_gx_variant() == 'gamecube' and GAMECUBE_STATIC_MESH is not None:
+            return GAMECUBE_STATIC_MESH.owner_name(self.parsed_files, entry)
+        try:
+            index = next(index for index, item in enumerate(self.parsed_files) if (
+                not item.get('is_resource') and item.get('file_type') == 0
+                and item.get('file_num') == entry.get('file_num')
+            ))
+        except StopIteration:
+            return ''
+        for candidate in reversed(self.parsed_files[:index]):
+            if candidate.get('is_resource'):
+                continue
+            if candidate.get('file_type') == 3:
+                return Path(str(candidate.get('name', '')).replace('\\', '/')).name
+        return ''
+
+    @staticmethod
+    def _static_mesh_matrix_multiply(left, right):
+        return [
+            [sum(left[row][axis] * right[axis][column] for axis in range(4)) for column in range(4)]
+            for row in range(4)
+        ]
+
+    def _static_mesh_part_transforms(self, group):
+        if not group:
+            return {}
+        if self._static_mesh_gx_variant() == 'ps2' and PS2_STATIC_MESH is not None:
+            return PS2_STATIC_MESH.part_transforms(self.parser, self.parsed_files, group)
+        if self._static_mesh_gx_variant() == 'gamecube':
+            return self._static_mesh_gamecube_part_transforms(group)
+        indices = [
+            index for index, item in enumerate(self.parsed_files)
+            if any(item is member or (
+                item.get('file_num') == member.get('file_num')
+                and not item.get('is_resource')
+                and item.get('file_type') == 0
+            ) for member in group)
+        ]
+        if not indices:
+            return {}
+        hierarchy = next(
+            (
+                item for item in reversed(self.parsed_files[:min(indices)])
+                if not item.get('is_resource') and item.get('file_type') == 3
+            ),
+            None,
+        )
+        if hierarchy is None:
+            return {}
+        try:
+            blob = bytes(self.parser.read_bytes(hierarchy['offset'], hierarchy['size']))
+            strings = [value.decode('latin1', errors='replace') for value in self.parser._read_pipeworks_string_entries()]
+            root_offset = struct.unpack_from('>I', blob, 0x1C)[0]
+            nodes = {}
+            visited = set()
+
+            def walk(relative):
+                if relative in visited or relative < 0 or relative + 0x30 > len(blob):
+                    return
+                visited.add(relative)
+                node_index, parent, child_count, name_index = struct.unpack_from('>4i', blob, relative)
+                if not (0 <= child_count <= 128 and 0 <= name_index < len(strings)):
+                    return
+                qx, qy, qz, qw = struct.unpack_from('>4f', blob, relative + 0x10)
+                tx, ty, tz = struct.unpack_from('>3f', blob, relative + 0x20)
+                norm = qx*qx + qy*qy + qz*qz + qw*qw
+                scale = 2.0 / norm if norm > 1.0e-12 else 0.0
+                xx, yy, zz = qx*qx*scale, qy*qy*scale, qz*qz*scale
+                xy, xz, yz = qx*qy*scale, qx*qz*scale, qy*qz*scale
+                wx, wy, wz = qw*qx*scale, qw*qy*scale, qw*qz*scale
+                local = [
+                    [1.0-yy-zz, xy-wz, xz+wy, tx],
+                    [xy+wz, 1.0-xx-zz, yz-wx, ty],
+                    [xz-wy, yz+wx, 1.0-xx-yy, tz],
+                    [0.0, 0.0, 0.0, 1.0],
+                ]
+                nodes[node_index] = {'parent': parent, 'name': strings[name_index], 'local': local}
+                for child in struct.unpack_from('>' + ('I' * child_count), blob, relative + 0x30):
+                    walk(child)
+
+            walk(root_offset)
+            globals_by_index = {}
+
+            def global_matrix(index):
+                if index in globals_by_index:
+                    return globals_by_index[index]
+                node = nodes[index]
+                parent = node['parent']
+                result = node['local']
+                if parent in nodes:
+                    result = self._static_mesh_matrix_multiply(global_matrix(parent), result)
+                globals_by_index[index] = result
+                return result
+
+            named = {node['name'].lower(): global_matrix(index) for index, node in nodes.items()}
+            transforms = {}
+            for part in group:
+                basename = Path(str(part.get('name', '')).replace('\\', '/')).name.lower()
+                matches = [(name, matrix) for name, matrix in named.items() if basename.endswith(name)]
+                if matches:
+                    transforms[part.get('file_num')] = max(matches, key=lambda match: len(match[0]))[1]
+            return transforms
+        except Exception:
+            return {}
+
+    def _static_mesh_gamecube_part_transforms(self, group):
+        if GAMECUBE_STATIC_MESH is None:
+            return {}
+        try:
+            return GAMECUBE_STATIC_MESH.part_transforms(self.parser, self.parsed_files, group)
+        except Exception:
+            return {}
+
+    def _static_mesh_gamecube_part_transforms_legacy(self, group):
+        indices = [
+            index for index, item in enumerate(self.parsed_files)
+            if any(item is member or (
+                item.get('file_num') == member.get('file_num')
+                and not item.get('is_resource')
+                and item.get('file_type') == 0
+            ) for member in group)
+        ]
+        if not indices:
+            return {}
+        hierarchy_index = next((
+            index for index in range(min(indices) - 1, -1, -1)
+            if not self.parsed_files[index].get('is_resource')
+            and self.parsed_files[index].get('file_type') == 3
+        ), None)
+        if hierarchy_index is None:
+            return {}
+        type4 = next((
+            item for item in self.parsed_files[hierarchy_index + 1:min(len(self.parsed_files), hierarchy_index + 5)]
+            if not item.get('is_resource') and item.get('file_type') == 4
+        ), None)
+        if type4 is None:
+            return {}
+        try:
+            hierarchy = self.parsed_files[hierarchy_index]
+            skeleton = bytes(self.parser.read_bytes(hierarchy['offset'], hierarchy['size']))
+            animation = bytes(self.parser.read_bytes(type4['offset'], type4['size']))
+            strings = [value.decode('latin1', errors='replace') for value in self.parser._read_pipeworks_string_entries()]
+            node_count = struct.unpack_from('>I', skeleton, 0x20)[0]
+            node_offsets = struct.unpack_from('>I', skeleton, 0x2C)[0]
+            animation_count = struct.unpack_from('>I', animation, 0x2C)[0]
+            animation_offsets = struct.unpack_from('>I', animation, 0x30)[0]
+            if not (0 < node_count <= animation_count < 512):
+                return {}
+            nodes = {}
+            for table_index in range(node_count):
+                relative = struct.unpack_from('>I', skeleton, node_offsets + table_index * 4)[0]
+                if relative + 0x10 > len(skeleton):
+                    continue
+                node_index, parent, _child_count, name_index = struct.unpack_from('>4i', skeleton, relative)
+                if not (0 <= node_index < animation_count and 0 <= name_index < len(strings)):
+                    continue
+                transform_relative = struct.unpack_from('>I', animation, animation_offsets + node_index * 4)[0]
+                if transform_relative + 0x40 > len(animation):
+                    continue
+                tx, ty, tz = struct.unpack_from('>3f', animation, transform_relative + 0x18)
+                qx, qy, qz, qw = struct.unpack_from('>4f', animation, transform_relative + 0x30)
+                norm = qx*qx + qy*qy + qz*qz + qw*qw
+                scale = 2.0 / norm if norm > 1.0e-12 else 0.0
+                xx, yy, zz = qx*qx*scale, qy*qy*scale, qz*qz*scale
+                xy, xz, yz = qx*qy*scale, qx*qz*scale, qy*qz*scale
+                wx, wy, wz = qw*qx*scale, qw*qy*scale, qw*qz*scale
+                local = [
+                    [1.0-yy-zz, xy-wz, xz+wy, tx],
+                    [xy+wz, 1.0-xx-zz, yz-wx, ty],
+                    [xz-wy, yz+wx, 1.0-xx-yy, tz],
+                    [0.0, 0.0, 0.0, 1.0],
+                ]
+                nodes[node_index] = {'parent': parent, 'name': strings[name_index], 'local': local}
+
+            globals_by_index = {}
+
+            def global_matrix(index):
+                if index in globals_by_index:
+                    return globals_by_index[index]
+                node = nodes[index]
+                is_root = node['parent'] not in nodes or node['parent'] == index
+                if is_root:
+                    local = node['local']
+                    result = [
+                        [1.0, 0.0, 0.0, local[0][3]],
+                        [0.0, 1.0, 0.0, local[1][3]],
+                        [0.0, 0.0, 1.0, local[2][3]],
+                        [0.0, 0.0, 0.0, 1.0],
+                    ]
+                else:
+                    result = node['local']
+                if not is_root:
+                    result = self._static_mesh_matrix_multiply(global_matrix(node['parent']), result)
+                globals_by_index[index] = result
+                return result
+
+            named = {
+                node['name'].lower(): (index, global_matrix(index))
+                for index, node in nodes.items()
+            }
+            transforms = {}
+            primary_file_num = group[0].get('file_num') if group else None
+            primary_name = str(group[0].get('name', '')).lower() if group else ''
+            for part in group:
+                basename = Path(str(part.get('name', '')).replace('\\', '/')).name.lower()
+                matches = [
+                    (name, node_index, matrix)
+                    for name, (node_index, matrix) in named.items()
+                    if basename.endswith(name)
+                ]
+                if matches:
+                    _name, node_index, matrix = max(matches, key=lambda match: len(match[0]))
+                    if part.get('file_num') == primary_file_num:
+                        matrix = [
+                            [1.0, 0.0, 0.0, matrix[0][3]],
+                            [0.0, 1.0, 0.0, matrix[1][3]],
+                            [0.0, 0.0, 1.0, matrix[2][3]],
+                            [0.0, 0.0, 0.0, 1.0],
+                        ]
+                    elif 'mothra_mesh_' in primary_name and basename.endswith('wing'):
+                        matrix = [list(row) for row in matrix]
+                        source_z = list(matrix[2])
+                        matrix[1] = source_z
+                        matrix[2] = [0.0, 0.0, 0.0, 0.0]
+                    transforms[part.get('file_num')] = matrix
+            return transforms
+        except Exception:
+            return {}
+
+    def _static_mesh_texture_for_entry(self, mesh_entry):
+        if self._static_mesh_gx_variant() == 'ps2':
+            return self._static_mesh_texture_for_ps2_entry(mesh_entry)
+        if self._static_mesh_gx_variant() == 'gamecube':
+            return self._static_mesh_texture_for_gamecube_entry(mesh_entry)
+        return self._static_mesh_texture_for_wii_entry(mesh_entry)
+
+    def _static_mesh_gx_variant(self):
+        suffix = Path(str(self.parser.filepath)).suffix.lower()
+        if not self.parser.is_big_endian:
+            return 'ps2'
+        return 'gamecube' if suffix in {'.ccg', '.cmg'} else 'wii'
+
+    def _static_mesh_texture_for_gamecube_entry(self, mesh_entry):
+        return self._static_mesh_texture_for_gx_entry(mesh_entry, gamecube=True)
+
+    def _static_mesh_texture_for_wii_entry(self, mesh_entry):
+        return self._static_mesh_texture_for_gx_entry(mesh_entry, gamecube=False)
+
+    def _static_mesh_texture_for_ps2_entry(self, mesh_entry):
+        if PS2_STATIC_MESH is None:
+            return None
+        try:
+            mesh_data = bytes(self.parser.read_bytes(mesh_entry['offset'], mesh_entry['size']))
+            material_entries = {}
+            for item in self.parsed_files:
+                if item.get('is_resource') or item.get('file_type') != 6 or item.get('size', 0) < 2:
+                    continue
+                blob = bytes(self.parser.read_bytes(item['offset'], item['size']))
+                material_entries[struct.unpack_from('<H', blob, 0)[0]] = (item, blob)
+            material_ids = PS2_STATIC_MESH.material_ids(mesh_data, set(material_entries))
+            if not material_ids:
+                return None
+            preview_session = getattr(self, 'static_mesh_preview_session', None)
+            decoded_images = (
+                preview_session.setdefault('decoded_material_textures', {})
+                if preview_session is not None else {}
+            )
+            material_map = {}
+            for material_id in dict.fromkeys(material_ids):
+                material_pair = material_entries.get(material_id)
+                if material_pair is None:
+                    continue
+                material_entry, material_blob = material_pair
+                texture_candidates = []
+                for asset_id in PS2_STATIC_MESH.texture_asset_ids(material_blob):
+                    asset_entry = next((
+                        item for item in self.parsed_files
+                        if not item.get('is_resource')
+                        and item.get('string_id') == asset_id
+                        and item.get('file_type') in {2, 9}
+                    ), None)
+                    if asset_entry is None:
+                        continue
+                    if asset_entry.get('file_type') == 9:
+                        candidate_texture = asset_entry
+                    else:
+                        ifl_data = bytes(self.parser.read_bytes(asset_entry['offset'], asset_entry['size']))
+                        lines = ifl_data.decode('ascii', errors='ignore').splitlines()
+                        first_frame = lines[0].split()[0] if lines else ''
+                        frame_stem = Path(first_frame).stem.lower()
+                        candidate_texture = next((
+                            item for item in self.parsed_files
+                            if not item.get('is_resource') and item.get('file_type') == 9
+                            and Path(str(item.get('name', '')).replace('\\', '/')).name.lower() == frame_stem
+                        ), None)
+                    if candidate_texture is not None and candidate_texture not in texture_candidates:
+                        texture_candidates.append(candidate_texture)
+                texture_main = None
+                largest_area = -1
+                for candidate_texture in texture_candidates:
+                    candidate_resource = next((
+                        item for item in self.parsed_files
+                        if item.get('is_resource') and item.get('file_type') == 9
+                        and item.get('file_num') == candidate_texture.get('file_num')
+                        and item.get('size', 0) > 0
+                    ), None)
+                    if candidate_resource is None:
+                        continue
+                    texture_data = bytes(self.parser.read_bytes(
+                        candidate_texture['offset'], candidate_texture['size']
+                    ))
+                    info = self.parser._texture_info_from_main_data(
+                        texture_data, candidate_resource.get('size', 0)
+                    )
+                    area = int(info.get('width', 0)) * int(info.get('height', 0))
+                    if area > largest_area:
+                        largest_area = area
+                        texture_main = candidate_texture
+                image = None
+                environment_image = None
+                if texture_main is not None:
+                    texture_resource = next((
+                        item for item in self.parsed_files
+                        if item.get('is_resource') and item.get('file_type') == 9
+                        and item.get('file_num') == texture_main.get('file_num')
+                        and item.get('size', 0) > 0
+                    ), None)
+                    if texture_resource is not None:
+                        cache_key = (self.parser.filepath, texture_resource.get('file_num'))
+                        image = decoded_images.get(cache_key)
+                        if image is None:
+                            texture_data = bytes(self.parser.read_bytes(texture_main['offset'], texture_main['size']))
+                            resource_data = bytes(self.parser.read_bytes(texture_resource['offset'], texture_resource['size']))
+                            info = self.parser._texture_info_from_main_data(texture_data, len(resource_data))
+                            info = self.parser._texture_info_with_name_hint(info, str(texture_main.get('name', '')))
+                            image = self.parser._decode_ps2_texture_image(resource_data, info, texture_main)
+                            decoded_images[cache_key] = image
+                    texture_basename = Path(
+                        str(texture_main.get('name', '')).replace('\\', '/')
+                    ).name.lower()
+                    if image is not None and 'cubemap' in texture_basename:
+                        environment_image = image
+                        image = None
+                color = None
+                material_opacity = 1.0
+                if len(material_blob) >= 0x14:
+                    diffuse = struct.unpack_from('<3f', material_blob, 8)
+                    if all(math.isfinite(value) for value in diffuse):
+                        color = tuple(max(0, min(255, round(value * 255.0))) for value in diffuse)
+                if len(material_blob) >= 0x18:
+                    native_alpha = struct.unpack_from('<f', material_blob, 0x14)[0]
+                    if math.isfinite(native_alpha):
+                        material_opacity = max(0.0, min(1.0, native_alpha))
+                flags = PS2_STATIC_MESH.material_flags(str(mesh_entry.get('name', '')), material_blob)
+                material_name = str(material_entry.get('name', '')).lower()
+                mesh_name_lower = str(mesh_entry.get('name', '')).lower()
+                if image is not None and (
+                    'biggodzillalogo' in material_name
+                    or 'billboard' in mesh_name_lower
+                    or 'billboard' in material_name
+                    or '_sign_' in mesh_name_lower
+                    or '/sign_' in material_name
+                    or '_sign_' in material_name
+                ):
+                    image = image.transpose(Image.Transpose.FLIP_LEFT_RIGHT)
+                if image is not None and 'foliage' in material_name:
+                    foliage = image.convert('RGBA')
+                    foliage.putdata([
+                        (r, g, b, 0 if max(r, g, b) <= 12 or max(r, g, b) - min(r, g, b) > 40 else a)
+                        for r, g, b, a in foliage.getdata()
+                    ])
+                    image = foliage
+                depth_only = 'zwrite' in material_name
+                render_flags = struct.unpack_from('<I', material_blob, 4)[0] if len(material_blob) >= 8 else 0
+                header_flags = struct.unpack_from('<H', material_blob, 2)[0] if len(material_blob) >= 4 else 0
+                alpha_test = bool(render_flags & 0x00100000 and header_flags & 0x0001)
+                alpha_source = image if image is not None else environment_image
+                explicit_alpha_material = any(
+                    token in material_name for token in ('propmap', 'decal')
+                )
+                has_texture_alpha = bool(
+                    (alpha_test or explicit_alpha_material or 'foliage' in material_name)
+                    and
+                    alpha_source is not None
+                    and alpha_source.mode in {'LA', 'RGBA'}
+                    and alpha_source.getchannel('A').getextrema() != (255, 255)
+                )
+                black_key = bool(
+                    flags.get('black_key')
+                    or ('foliage' in material_name and not has_texture_alpha)
+                )
+                material_map[material_id] = {
+                    'name': material_name,
+                    'texture_name': str(texture_main.get('name', '')) if texture_main is not None else None,
+                    'image': image,
+                    'environment_image': environment_image,
+                    'two_sided': bool(flags.get('two_sided')),
+                    'black_key': black_key,
+                    'texture_alpha': has_texture_alpha,
+                    'alpha_test': bool(alpha_test and has_texture_alpha),
+                    'vertex_alpha': bool(render_flags & 0x00100000),
+                    'opacity': 0.0 if depth_only else (
+                        material_opacity
+                    ),
+                    'uv_set': 0,
+                    'uv_transform': PS2_STATIC_MESH.texture_transform(material_blob),
+                    'legacy_uv': False,
+                    'color': color,
+                }
+            return material_map or None
+        except Exception:
+            return None
+
+    def _static_mesh_texture_for_gx_entry(self, mesh_entry, gamecube):
+        try:
+            mesh_data = bytes(self.parser.read_bytes(mesh_entry['offset'], mesh_entry['size']))
+            endian = '>' if self.parser.is_big_endian else '<'
+            material_ids = []
+            if self.parser.is_big_endian and len(mesh_data) >= 0x38:
+                if gamecube:
+                    legacy_surface_count = struct.unpack_from('>I', mesh_data, 0)[0]
+                    for surface_index in range(min(legacy_surface_count, 1024)):
+                        material_offset = 0x84 + surface_index * 0x7C
+                        if material_offset + 2 > len(mesh_data):
+                            break
+                        candidate = struct.unpack_from('>H', mesh_data, material_offset)[0]
+                        if candidate and candidate not in material_ids:
+                            material_ids.append(candidate)
+                else:
+                    surface_count = struct.unpack_from('>I', mesh_data, 0x10)[0]
+                    for surface_index in range(min(surface_count, 1024)):
+                        material_offset = 0x36 + surface_index * 0x60
+                        if material_offset + 2 > len(mesh_data):
+                            break
+                        material_ids.append(struct.unpack_from('>H', mesh_data, material_offset)[0])
+
+            if material_ids:
+                mesh_name_lower = str(mesh_entry.get('name', '')).lower()
+                material_entries = {}
+                texture_main_by_id = {}
+                for item in self.parsed_files:
+                    if item.get('is_resource') or item.get('size', 0) < 2:
+                        continue
+                    if item.get('file_type') not in {6, 9}:
+                        continue
+                    blob = bytes(self.parser.read_bytes(item['offset'], item['size']))
+                    if item.get('file_type') == 6:
+                        record_id = struct.unpack_from(endian + 'H', blob, 0)[0]
+                        material_entries[record_id] = (item, blob)
+                    else:
+                        metadata = bytes(item.get('metadata_bytes') or b'')
+                        if len(metadata) < 8:
+                            continue
+                        record_id = struct.unpack_from(endian + 'H', metadata, 6)[0]
+                        texture_main_by_id[record_id] = item
+
+                material_map = {}
+                preview_session = getattr(self, 'static_mesh_preview_session', None)
+                decoded_images = (
+                    preview_session.setdefault('decoded_material_textures', {})
+                    if preview_session is not None else {}
+                )
+                for material_id in material_ids:
+                    material_pair = material_entries.get(material_id)
+                    if material_pair is None:
+                        continue
+                    _material_entry, material_blob = material_pair
+                    texture_main = None
+                    if gamecube:
+                        texture_id = (
+                            struct.unpack_from('>H', material_blob, 0x38)[0]
+                            if len(material_blob) >= 0x3A else 0
+                        )
+                        texture_main = texture_main_by_id.get(texture_id)
+                        asset_id = texture_id
+                        asset_entry = next((
+                            candidate for candidate in self.parsed_files
+                            if not candidate.get('is_resource')
+                            and candidate.get('string_id') == asset_id
+                            and candidate.get('file_type') in {2, 9}
+                        ), None)
+                        if texture_main is None and asset_entry is not None:
+                            if asset_entry.get('file_type') == 9:
+                                texture_main = asset_entry
+                            else:
+                                ifl_data = bytes(self.parser.read_bytes(
+                                    asset_entry['offset'], asset_entry['size']
+                                ))
+                                first_frame = ifl_data.decode('ascii', errors='ignore').splitlines()
+                                first_frame = first_frame[0].split()[0] if first_frame else ''
+                                frame_stem = Path(first_frame).stem.lower()
+                                texture_main = next((
+                                    candidate for candidate in self.parsed_files
+                                    if not candidate.get('is_resource')
+                                    and candidate.get('file_type') == 9
+                                    and Path(str(candidate.get('name', '')).replace('\\', '/')).name.lower() == frame_stem
+                                ), None)
+                        if texture_main is None and texture_id:
+                            material_index = self.parsed_files.index(_material_entry)
+                            for candidate in self.parsed_files[material_index + 1:]:
+                                if candidate.get('is_resource'):
+                                    continue
+                                if candidate.get('file_type') in {0, 6}:
+                                    break
+                                if candidate.get('file_type') == 9:
+                                    texture_main = candidate
+                                    break
+                    else:
+                        texture_id = (
+                            struct.unpack_from(endian + 'I', material_blob, 0x38)[0] >> 16
+                            if len(material_blob) >= 0x3C else 0
+                        )
+                        if not texture_id and len(material_blob) >= 0x32:
+                            texture_id = struct.unpack_from(endian + 'H', material_blob, 0x30)[0]
+                        texture_main = texture_main_by_id.get(texture_id)
+                    image = None
+                    if texture_main is not None:
+                        texture_resource = next((
+                            item for item in self.parsed_files
+                            if item.get('is_resource')
+                            and item.get('file_type') == 9
+                            and item.get('file_num') == texture_main.get('file_num')
+                            and item.get('size', 0) > 0
+                        ), None)
+                        if texture_resource is not None:
+                            cache_key = (self.parser.filepath, texture_resource.get('file_num'))
+                            image = decoded_images.get(cache_key)
+                            if image is None:
+                                texture_main_data = bytes(self.parser.read_bytes(texture_main['offset'], texture_main['size']))
+                                resource_data = bytes(self.parser.read_bytes(texture_resource['offset'], texture_resource['size']))
+                                info = self.parser._texture_info_from_main_data(texture_main_data, len(resource_data))
+                                info = self.parser._texture_info_with_name_hint(info, str(texture_main.get('name', '')))
+                                base_size = self.parser._texture_block_size(info['format'], info['width'], info['height'])
+                                image = self.parser._decode_texture_image(
+                                    resource_data[:base_size], info['format'], info['width'], info['height']
+                                )
+                                decoded_images[cache_key] = image
+                    material_name = str(_material_entry.get('name', '')).lower()
+                    hidden_preview_material = gamecube and any(
+                        token in material_name for token in (
+                            'freezerayorigin', 'exhaust', 'gouge_zwrite', 'skirt'
+                        )
+                    )
+                    hidden_preview_material = hidden_preview_material or (
+                        gamecube and 'skirt' in mesh_name_lower
+                    )
+                    is_blended_shell = (
+                        'inner_reflect' in mesh_name_lower
+                        or ('water' in material_name and 'watertower' not in material_name)
+                    )
+                    force_opaque = material_name.endswith('/tripod_si') or material_name == 'tripod_si'
+                    render_flags = struct.unpack_from(endian + 'I', material_blob, 4)[0] if len(material_blob) >= 8 else 0
+                    render_mode = render_flags & 0x0F
+                    alpha_test = render_mode == 0x0D and not force_opaque
+                    alpha_blend = render_mode == 0x0E and not force_opaque
+                    is_effect_alpha = alpha_test or alpha_blend
+                    native_opacity = 1.0
+                    uses_secondary_uv = (
+                        not gamecube
+                        and (
+                            'stone' in material_name
+                            or (
+                                any(token in material_name for token in ('_win_', 'window'))
+                                and 'blend_shell' not in material_name
+                            )
+                        )
+                    )
+                    solid_color = None
+                    if gamecube and len(material_blob) >= 0x28:
+                        diffuse = struct.unpack_from('>4f', material_blob, 0x18)
+                        if all(math.isfinite(value) for value in diffuse):
+                            solid_color = tuple(
+                                max(0, min(255, round(value * 255.0)))
+                                for value in diffuse[:3]
+                            )
+                    is_debug_solid = bool(
+                        gamecube
+                        and image is None
+                        and solid_color is not None
+                        and re.search(r'material\s*#\d+', material_name, re.IGNORECASE)
+                        and max(solid_color) >= 230
+                        and min(solid_color) <= 80
+                        and max(solid_color) - min(solid_color) >= 160
+                    )
+                    gamecube_flags = (
+                        GAMECUBE_STATIC_MESH.material_flags(mesh_name_lower, material_blob)
+                        if gamecube and GAMECUBE_STATIC_MESH is not None else {}
+                    )
+                    black_key = bool(gamecube_flags.get('black_key'))
+                    color_key = bool(gamecube_flags.get('color_key'))
+                    material_map[material_id] = {
+                        'name': material_name,
+                        'texture_name': str(texture_main.get('name', '')) if texture_main is not None else None,
+                        'image': image,
+                        'two_sided': bool(gamecube_flags.get('two_sided')) if gamecube else bool(
+                            len(material_blob) > 7 and material_blob[7] & 0x01
+                        ),
+                        'black_key': black_key,
+                        'texture_alpha': bool(black_key or color_key or is_effect_alpha),
+                        'alpha_test': alpha_test,
+                        'vertex_alpha': alpha_blend,
+                        'color_key': bool(color_key or (
+                            alpha_test and image is not None and image.mode in {'RGB', 'RGBA'}
+                            and (image.mode == 'RGB' or image.getchannel('A').getextrema() == (255, 255))
+                        )),
+                        'opacity': 0.0 if hidden_preview_material or is_debug_solid else (
+                            native_opacity if is_effect_alpha else (0.42 if is_blended_shell else 1.0)
+                        ),
+                        'uv_set': 1 if uses_secondary_uv else 0,
+                        'legacy_uv': bool(gamecube_flags.get('legacy_uv')),
+                        'color': solid_color,
+                    }
+                if not gamecube and '_lo_' in mesh_name_lower and material_map:
+                    family = mesh_name_lower.split('_lo_', 1)[0].rsplit('/', 1)[-1]
+                    roof_pair = next((
+                        (candidate, bytes(self.parser.read_bytes(candidate['offset'], candidate['size'])))
+                        for candidate in self.parsed_files
+                        if not candidate.get('is_resource') and candidate.get('file_type') == 6
+                        and family in str(candidate.get('name', '')).lower()
+                        and 'roof_blend_shell' in str(candidate.get('name', '')).lower()
+                    ), None)
+                    if roof_pair is not None:
+                        _roof_material, roof_blob = roof_pair
+                        roof_material_id = (
+                            struct.unpack_from(endian + 'H', roof_blob, 0)[0]
+                            if len(roof_blob) >= 2 else None
+                        )
+                        roof_uv_bounds = None
+                        detailed_mesh_entry = next((
+                            candidate for candidate in self.parsed_files
+                            if not candidate.get('is_resource') and candidate.get('file_type') == 0
+                            and str(candidate.get('name', '')).lower().rsplit('/', 1)[-1]
+                            == f'{family}_{family}'
+                        ), None)
+                        if detailed_mesh_entry is not None and STATIC_MESH_VIEWER is not None:
+                            detailed_resource = next((
+                                candidate for candidate in self.parsed_files
+                                if candidate.get('is_resource') and candidate.get('file_type') == 0
+                                and candidate.get('file_num') == detailed_mesh_entry.get('file_num')
+                                and candidate.get('size', 0) > 0
+                            ), None)
+                            if detailed_resource is not None:
+                                detailed_mesh = STATIC_MESH_VIEWER.decode_static_mesh(
+                                    bytes(self.parser.read_bytes(
+                                        detailed_mesh_entry['offset'], detailed_mesh_entry['size']
+                                    )),
+                                    bytes(self.parser.read_bytes(
+                                        detailed_resource['offset'], detailed_resource['size']
+                                    )),
+                                    bool(self.parser.is_big_endian),
+                                    gx_variant='wii',
+                                )
+                                roof_uvs = [
+                                    detailed_mesh.uvs[uv_index]
+                                    for face_index, uv_face in enumerate(detailed_mesh.uv_faces or [])
+                                    if detailed_mesh.face_materials
+                                    and detailed_mesh.face_materials[face_index] == roof_material_id
+                                    for uv_index in uv_face
+                                ]
+                                if roof_uvs:
+                                    roof_uv_bounds = (
+                                        min(uv[0] for uv in roof_uvs), max(uv[0] for uv in roof_uvs),
+                                        min(uv[1] for uv in roof_uvs), max(uv[1] for uv in roof_uvs),
+                                    )
+                        roof_texture_id = (
+                            struct.unpack_from(endian + 'I', roof_blob, 0x38)[0] >> 16
+                            if len(roof_blob) >= 0x3C else 0
+                        )
+                        roof_texture = texture_main_by_id.get(roof_texture_id)
+                        if roof_texture is not None:
+                            roof_resource = next((
+                                item for item in self.parsed_files
+                                if item.get('is_resource') and item.get('file_type') == 9
+                                and item.get('file_num') == roof_texture.get('file_num')
+                                and item.get('size', 0) > 0
+                            ), None)
+                            if roof_resource is not None:
+                                cache_key = (self.parser.filepath, roof_resource.get('file_num'))
+                                roof_image = decoded_images.get(cache_key)
+                                if roof_image is None:
+                                    roof_main = bytes(self.parser.read_bytes(roof_texture['offset'], roof_texture['size']))
+                                    roof_data = bytes(self.parser.read_bytes(roof_resource['offset'], roof_resource['size']))
+                                    roof_info = self.parser._texture_info_from_main_data(roof_main, len(roof_data))
+                                    roof_info = self.parser._texture_info_with_name_hint(
+                                        roof_info, str(roof_texture.get('name', ''))
+                                    )
+                                    roof_size = self.parser._texture_block_size(
+                                        roof_info['format'], roof_info['width'], roof_info['height']
+                                    )
+                                    roof_image = self.parser._decode_texture_image(
+                                        roof_data[:roof_size], roof_info['format'],
+                                        roof_info['width'], roof_info['height']
+                                    )
+                                    decoded_images[cache_key] = roof_image
+                                if roof_image is not None:
+                                    for material in material_map.values():
+                                        material['roof_image'] = roof_image
+                                        material['roof_uv_bounds'] = roof_uv_bounds
+                    detailed_mesh_entry = next((
+                        candidate for candidate in self.parsed_files
+                        if not candidate.get('is_resource') and candidate.get('file_type') == 0
+                        and str(candidate.get('name', '')).lower().rsplit('/', 1)[-1]
+                        == f'{family}_{family}'
+                    ), None)
+                    if detailed_mesh_entry is not None and STATIC_MESH_VIEWER is not None:
+                        detailed_resource = next((
+                            candidate for candidate in self.parsed_files
+                            if candidate.get('is_resource') and candidate.get('file_type') == 0
+                            and candidate.get('file_num') == detailed_mesh_entry.get('file_num')
+                            and candidate.get('size', 0) > 0
+                        ), None)
+                        if detailed_resource is not None:
+                            detailed_mesh = STATIC_MESH_VIEWER.decode_static_mesh(
+                                bytes(self.parser.read_bytes(
+                                    detailed_mesh_entry['offset'], detailed_mesh_entry['size']
+                                )),
+                                bytes(self.parser.read_bytes(
+                                    detailed_resource['offset'], detailed_resource['size']
+                                )),
+                                bool(self.parser.is_big_endian),
+                                gx_variant='wii',
+                            )
+                            detailed_materials = self._static_mesh_texture_for_gx_entry(
+                                detailed_mesh_entry, False
+                            ) or {}
+                            counterpart_roofs = {}
+                            for face_index, face in enumerate(detailed_mesh.faces):
+                                a, b, c = (detailed_mesh.vertices[index] for index in face)
+                                ux, uy, uz = (b[index] - a[index] for index in range(3))
+                                vx, vy, vz = (c[index] - a[index] for index in range(3))
+                                nx, ny, nz = uy*vz-uz*vy, uz*vx-ux*vz, ux*vy-uy*vx
+                                normal_length = math.sqrt(nx*nx + ny*ny + nz*nz) or 1.0
+                                if abs(nz) / normal_length < 0.9:
+                                    continue
+                                material_id = (
+                                    detailed_mesh.face_materials[face_index]
+                                    if detailed_mesh.face_materials else None
+                                )
+                                detailed_material = detailed_materials.get(material_id) or {}
+                                detailed_image = detailed_material.get('image')
+                                if detailed_image is None or not detailed_mesh.uv_faces:
+                                    continue
+                                positions = [
+                                    tuple(round(value, 4) for value in detailed_mesh.vertices[index])
+                                    for index in face
+                                ]
+                                uv_face = detailed_mesh.uv_faces[face_index]
+                                counterpart_roofs[tuple(sorted(positions))] = {
+                                    'image': detailed_image,
+                                    'uv_by_position': {
+                                        position: detailed_mesh.uvs[uv_face[index]]
+                                        for index, position in enumerate(positions)
+                                    },
+                                }
+                            if counterpart_roofs:
+                                for material in material_map.values():
+                                    material['counterpart_roofs'] = counterpart_roofs
+                if material_map:
+                    return material_map
+
+            mesh_index = next(index for index, item in enumerate(self.parsed_files) if (
+                item.get('file_num') == mesh_entry.get('file_num')
+                and not item.get('is_resource')
+                and item.get('file_type') == 0
+            ))
+            start = mesh_index
+            while start > 0:
+                candidate = self.parsed_files[start - 1]
+                if not candidate.get('is_resource') and candidate.get('file_type') in {3, 16}:
+                    break
+                start -= 1
+            textures = [
+                item for item in self.parsed_files[start:mesh_index]
+                if item.get('is_resource') and item.get('file_type') == 9 and item.get('size', 0) > 0
+            ]
+            if not textures:
+                return None
+            mesh_name = Path(str(mesh_entry.get('name', '')).replace('\\', '/')).name.lower()
+            mesh_tokens = set(re.findall(r'[a-z0-9]+', mesh_name))
+            def texture_score(item):
+                texture_tokens = set(re.findall(
+                    r'[a-z0-9]+',
+                    Path(str(item.get('name', '')).replace('\\', '/')).stem.lower(),
+                ))
+                shared = mesh_tokens & texture_tokens
+                effect_only = {'anim', 'animated', 'glow', 'strobe'}
+                unmatched_effects = (texture_tokens & effect_only) - mesh_tokens
+                part_matches = shared - {'map', 'texture'}
+                map_bonus = 1 if 'map' in texture_tokens and not ({'drill', 'wheel', 'gun', 'barrel'} & mesh_tokens) else 0
+                return (
+                    len(part_matches) * 4 + map_bonus - len(unmatched_effects) * 8,
+                    -len(texture_tokens - mesh_tokens - {'map', 'texture'}),
+                    textures.index(item),
+                )
+
+            texture = max(textures, key=texture_score)
+            main_entry = self.parser._texture_main_entry_for_resource(texture)
+            main_data = bytes(self.parser.read_bytes(main_entry['offset'], main_entry['size']))
+            resource_data = bytes(self.parser.read_bytes(texture['offset'], texture['size']))
+            info = self.parser._texture_info_from_main_data(main_data, len(resource_data))
+            info = self.parser._texture_info_with_name_hint(info, str(main_entry.get('name', '')))
+            base_size = self.parser._texture_block_size(info['format'], info['width'], info['height'])
+            return self.parser._decode_texture_image(
+                resource_data[:base_size], info['format'], info['width'], info['height']
+            )
+        except Exception:
+            return None
+
+    def _setup_static_mesh_preview_selector(self, selected_entry):
+        if not self.static_mesh_preview_session:
+            return
+        entries = self.static_mesh_preview_session.get("entries", [])
+        values = [str(item.get('name', 'mesh')).replace('\\', '/') for item in entries]
+        self._updating_bundle_dropdown = True
+        self.bundle_dropdown["values"] = values
+        selected_name = str(selected_entry.get('name', 'mesh')).replace('\\', '/')
+        if selected_name in values:
+            self.bundle_dropdown.current(values.index(selected_name))
+        elif values:
+            self.bundle_dropdown.current(0)
+        self.bundle_label.config(text="Mesh:")
+        self.bundle_label.grid()
+        self.bundle_dropdown.grid()
+        self.bundle_select_frame.grid()
+        self.show_editor_back_button()
+        self._updating_bundle_dropdown = False
+
+    def on_static_mesh_preview_selected(self, _event=None):
+        if self._updating_bundle_dropdown or not self.static_mesh_preview_session:
+            return
+        selected_index = self.bundle_dropdown.current()
+        entries = self.static_mesh_preview_session.get("entries", [])
+        if 0 <= selected_index < len(entries):
+            self.open_static_mesh_preview(entries[selected_index])
 
     def _texture_preview_entries(self):
         return [entry for entry in self.parsed_files if self._is_texture_preview_entry(entry)]
@@ -8924,6 +11558,10 @@ class PipeworksGUI:
                 return
 
         self.texture_preview_entry = dict(entry)
+        self.text_mode = None
+        self.text_source_path = None
+        self.bundle_entry_edit = None
+        self._hide_find_bar_completely()
         self._setup_texture_preview_selector(entry)
         self.extract_btn.config(text="Replace PNG", state=tk.NORMAL)
         self.rebuild_btn.config(text="Save", state=tk.DISABLED)
@@ -8979,6 +11617,22 @@ class PipeworksGUI:
         )
         if not selected:
             return False
+        return self._replace_texture_preview_png_from_path(selected)
+
+    def _replace_texture_preview_png_from_path(self, selected):
+        if not self.texture_preview_session or not self.texture_preview_entry:
+            return False
+        if not selected or not os.path.isfile(selected) or not selected.lower().endswith('.png'):
+            messagebox.showerror("Replace PNG", "Drop a valid PNG file onto the open texture preview.")
+            return False
+        if HAS_PIL:
+            try:
+                with Image.open(selected) as replacement:
+                    replacement.verify()
+            except Exception as exc:
+                messagebox.showerror("Replace PNG", f"The dropped file is not a valid PNG:\n{exc}")
+                return False
+        png_path = self._texture_preview_png_path(self.texture_preview_session, self.texture_preview_entry)
         try:
             png_path.parent.mkdir(parents=True, exist_ok=True)
             if os.path.abspath(selected).lower() != os.path.abspath(png_path).lower():
@@ -9065,12 +11719,19 @@ class PipeworksGUI:
         return Path(session["replacement_dir"]) / self._bundle_entry_display_name(entry)
 
     def _bundle_editor_return_context(self, bundle_path=None):
+        match_ranges = self.output_text.tag_ranges("find_match")
         context = {
             "mode": "directory" if self.bundle_files else "file",
             "directory": self.current_bundle_dir,
             "selected_rel": self.bundle_dropdown.get() if self.bundle_files else "",
             "bundle_path": bundle_path or (self.parser.filepath if self.parser and hasattr(self.parser, "filepath") else ""),
             "zip_source": self._current_zip_source,
+            "find_query": self.find_var.get(),
+            "find_visible": bool(self.find_frame.winfo_ismapped()),
+            "find_match": str(match_ranges[0]) if match_ranges else "",
+            "insert": str(self.output_text.index(tk.INSERT)),
+            "yview": self.output_text.yview()[0],
+            "xview": self.output_text.xview()[0],
         }
         if self._current_zip_source:
             context["mode"] = "file" if not self.bundle_files else "directory"
@@ -9104,30 +11765,19 @@ class PipeworksGUI:
         entries = self.bundle_entry_session.get("entries", [])
         if selected_index < 0 or selected_index >= len(entries):
             return
-        if not self._confirm_save_current_editor_before_navigation("Switch Edited File"):
+        if not self._stage_current_bundle_editor_changes():
             if self.bundle_entry_edit:
                 self._setup_bundle_entry_selector(self.bundle_entry_edit.get("entry", {}))
             return
         self.open_bundle_entry_editor(entries[selected_index])
 
-    def _confirm_save_current_editor_before_navigation(self, title="Unsaved Changes"):
+    def _stage_current_bundle_editor_changes(self):
+        """Compile the current editor into the temporary multi-file session."""
         if not self.bundle_entry_edit or not self._editor_has_unsaved_text_changes():
             return True
-        entry_name = self._bundle_entry_display_name(self.bundle_entry_edit.get("entry", {}))
-        choice = messagebox.askyesnocancel(
-            title,
-            f"Save changes to this file before continuing?\n\n{entry_name}",
-            parent=self.root,
-        )
-        if choice is None:
+        if not self.write_current_editor_to_source():
             return False
-        if choice:
-            if not self.write_current_editor_to_source():
-                return False
-            self.output_text.edit_reset()
-            self.output_text.edit_modified(False)
-            self._sync_editor_diff_baseline()
-            return True
+        self.output_text.edit_reset()
         self.output_text.edit_modified(False)
         self._sync_editor_diff_baseline()
         return True
@@ -9153,15 +11803,51 @@ class PipeworksGUI:
 
     def _prompt_save_bundle_entry_changes(self, changed_names):
         if not changed_names:
-            return False
-        preview = "\n".join(f"- {name}" for name in changed_names[:12])
-        if len(changed_names) > 12:
-            preview += f"\n- ...and {len(changed_names) - 12} more"
-        return messagebox.askyesnocancel(
-            "Save Bundle Changes",
-            f"Save these edited file(s) into the bundle before going back?\n\n{preview}",
-            parent=self.root,
+            return False, []
+
+        dialog = tk.Toplevel(self.root)
+        set_window_icon(dialog)
+        dialog.title("Save Bundle Changes")
+        dialog.transient(self.root)
+        dialog.resizable(False, False)
+        result = {"choice": None}
+        variables = []
+
+        body = ttk.Frame(dialog, padding=14)
+        body.pack(fill=tk.BOTH, expand=True)
+        ttk.Label(body, text="Save these edited file(s) into the bundle?").pack(
+            anchor=tk.W, pady=(0, 10)
         )
+        list_frame = ttk.Frame(body)
+        list_frame.pack(fill=tk.BOTH, expand=True)
+        for name in changed_names:
+            selected = tk.BooleanVar(value=True)
+            variables.append((name, selected))
+            ttk.Checkbutton(list_frame, text=name, variable=selected).pack(anchor=tk.W, pady=1)
+
+        buttons = ttk.Frame(body)
+        buttons.pack(fill=tk.X, pady=(14, 0))
+
+        def finish(choice):
+            result["choice"] = choice
+            dialog.destroy()
+
+        ttk.Button(buttons, text="Yes", command=lambda: finish(True), width=10).pack(side=tk.LEFT, padx=(0, 6))
+        ttk.Button(buttons, text="No", command=lambda: finish(False), width=10).pack(side=tk.LEFT, padx=(0, 6))
+        ttk.Button(buttons, text="Cancel", command=lambda: finish(None), width=10).pack(side=tk.LEFT)
+        dialog.protocol("WM_DELETE_WINDOW", lambda: finish(None))
+        dialog.bind("<Escape>", lambda _event: finish(None))
+        dialog.bind("<Return>", lambda _event: finish(True))
+        apply_button_outline(dialog)
+        dialog.update_idletasks()
+        x = self.root.winfo_rootx() + (self.root.winfo_width() - dialog.winfo_width()) // 2
+        y = self.root.winfo_rooty() + (self.root.winfo_height() - dialog.winfo_height()) // 2
+        dialog.geometry(f"+{max(0, x)}+{max(0, y)}")
+        dialog.grab_set()
+        dialog.focus_force()
+        dialog.wait_window()
+        selected_names = [name for name, selected in variables if selected.get()]
+        return result["choice"], selected_names
 
     def _restore_bundle_entry_return_context(self, context):
         mode = context.get("mode") if context else ""
@@ -9169,20 +11855,48 @@ class PipeworksGUI:
             selected_rel = context.get("selected_rel", "")
             select_file = os.path.join(context["directory"], selected_rel) if selected_rel else None
             self.load_directory(context["directory"], select_file=select_file)
+            self.root.after_idle(lambda c=dict(context): self._restore_bundle_view_state(c))
             return
         zip_source = context.get("zip_source") if context else None
         if zip_source and os.path.exists(zip_source):
             self.load_bundle_file(zip_source)
+            self.root.after_idle(lambda c=dict(context): self._restore_bundle_view_state(c))
             return
         bundle_path = context.get("bundle_path") if context else None
         if not bundle_path and self.parser and hasattr(self.parser, "filepath"):
             bundle_path = self.parser.filepath
         if bundle_path and os.path.exists(bundle_path):
             self.load_bundle_file(bundle_path)
+            self.root.after_idle(lambda c=dict(context): self._restore_bundle_view_state(c))
+
+    def _restore_bundle_view_state(self, context):
+        query = str(context.get("find_query", ""))
+        self.find_var.set(query)
+        if context.get("find_visible"):
+            self._position_find_bar()
+        else:
+            self.find_frame.place_forget()
+        self.output_text.tag_remove("find_match", "1.0", tk.END)
+        match = str(context.get("find_match", ""))
+        if query and match:
+            try:
+                if self.output_text.get(match, f"{match}+{len(query)}c").lower() == query.lower():
+                    self.output_text.tag_add("find_match", match, f"{match}+{len(query)}c")
+            except tk.TclError:
+                pass
+        try:
+            self.output_text.mark_set(tk.INSERT, context.get("insert", "1.0"))
+            self.output_text.xview_moveto(float(context.get("xview", 0.0)))
+            self.output_text.yview_moveto(float(context.get("yview", 0.0)))
+        except (tk.TclError, TypeError, ValueError):
+            pass
 
     def back_to_bundle_view(self):
         self._cancel_character_data_decode()
         self.cancel_lazy_syntax_highlight()
+        # Read-only viewers such as FDF disable the shared output widget.
+        # Restore it before the bundle parser redraws the main file listing.
+        self.output_text.config(state=tk.NORMAL)
         if self.texture_preview_session:
             session = self.texture_preview_session
             context = dict(session.get("return_context", {})) if session else {}
@@ -9200,20 +11914,44 @@ class PipeworksGUI:
             self._restore_bundle_entry_return_context(context)
             return
 
+        if self.static_mesh_preview_session:
+            session = self.static_mesh_preview_session
+            context = dict(session.get("return_context", {})) if session else {}
+            if session:
+                context["bundle_path"] = session.get("bundle_path")
+            if self.static_mesh_preview_viewer:
+                self.static_mesh_preview_viewer.destroy()
+            self.static_mesh_preview_session = None
+            self.static_mesh_preview_entry = None
+            self.static_mesh_preview_viewer = None
+            self.bundle_label.config(text="Bundle:")
+            self.bundle_label.grid()
+            self.bundle_dropdown.grid()
+            self.hide_editor_back_button()
+            self.extract_btn.config(text="Extract", command=self.extract_files, state=tk.NORMAL)
+            self.rebuild_btn.config(text="Rebuild", state=tk.NORMAL)
+            if not self.rebuild_btn.winfo_manager():
+                self.rebuild_btn.pack(side=tk.LEFT, padx=(0, 5), before=self.build_btn)
+            self._restore_bundle_entry_return_context(context)
+            return
+
         session = self.bundle_entry_session
         context = dict(session.get("return_context", {})) if session else {}
         if session:
             context["bundle_path"] = session.get("bundle_path")
             context.setdefault("zip_source", self._current_zip_source)
-        if not self._confirm_save_current_editor_before_navigation("Back"):
+        # Back is governed by the aggregate bundle-change prompt below. Stage
+        # the current editor into the session first so it appears in that one
+        # list instead of showing a redundant single-file save prompt.
+        if not self._stage_current_bundle_editor_changes():
             return
         changed_names = self._changed_bundle_entry_names()
         if changed_names:
-            save_choice = self._prompt_save_bundle_entry_changes(changed_names)
+            save_choice, selected_names = self._prompt_save_bundle_entry_changes(changed_names)
             if save_choice is None:
                 return
             if save_choice:
-                if not self.save_bundle_entry_edit():
+                if not self.save_bundle_entry_edit(selected_names=selected_names):
                     return
         self.bundle_entry_edit = None
         self.bundle_entry_session = None
@@ -9230,11 +11968,23 @@ class PipeworksGUI:
             return
 
         session = self._ensure_bundle_entry_session(entry)
+        if self._is_palette_entry(entry):
+            self.open_palette_editor(entry, session)
+            return
+        if self._is_camera_path_entry(entry):
+            self.open_camera_path_editor(entry, session)
+            return
+        if self._is_fdf_entry(entry):
+            self.open_fdf_viewer(entry, session)
+            return
         if self._is_character_data_entry(entry) or self._is_level_data_entry(entry):
             self.open_character_data_editor(entry, session)
             return
         if self._is_skeleton_type3_entry(entry):
             self.open_skeleton_type3_editor(entry, session)
+            return
+        if self._is_material_entry(entry):
+            self.open_material_editor(entry, session)
             return
 
         temp_path = self._entry_temp_path(session, entry)
@@ -9259,6 +12009,445 @@ class PipeworksGUI:
 
         ext = temp_path.suffix.lower()
         self.load_text_editor_file(str(temp_path), ext, from_bundle_entry=True)
+
+    def _entry_binary_editor_paths(self, entry, session, text_suffix):
+        temp_path = self._entry_temp_path(session, entry)
+        if not temp_path.exists():
+            if not self.parser.extract_file(entry, session["replacement_dir"]):
+                raise ValueError(f"Failed to extract entry: {entry.get('name')}")
+            if not temp_path.exists():
+                matches = list(Path(session["replacement_dir"]).rglob(Path(entry['name']).name))
+                if not matches:
+                    raise ValueError(f"Extracted entry was not found: {entry.get('name')}")
+                temp_path = matches[0]
+        text_path = temp_path.with_name(temp_path.name + text_suffix)
+        return temp_path, text_path
+
+    def open_material_editor(self, entry, session):
+        try:
+            binary_path, text_path = self._entry_binary_editor_paths(entry, session, ".material.txt")
+            source_blob = binary_path.read_bytes()
+            endian = '>' if self.parser.is_big_endian else '<'
+            rendered = MATERIAL_TEXT_TOOL.decode_material(
+                source_blob,
+                endian,
+                self._bundle_entry_display_name(entry),
+            )
+            related_textures = self._related_texture_entries_for_material(entry)
+            if related_textures:
+                related_lines = ["", "# Related textures (click a name to preview)"]
+                related_lines.extend(f"# texture: {item.get('name', '')}" for item in related_textures)
+                rendered = rendered.rstrip("\n") + "\n" + "\n".join(related_lines) + "\n"
+            text_path.write_text(rendered, encoding="utf-8", newline="\n")
+        except Exception as exc:
+            messagebox.showerror("Open Material", f"Failed to decode material:\n{exc}")
+            return
+
+        self.bundle_entry_edit = {
+            "bundle_path": session["bundle_path"],
+            "entry": dict(entry),
+            "replacement_dir": session["replacement_dir"],
+            "temp_path": str(binary_path),
+            "text_path": str(text_path),
+            "material_original": source_blob,
+            "material_endian": endian,
+            "material_tool": MATERIAL_TEXT_TOOL,
+            "material_related_textures": [dict(item) for item in related_textures],
+        }
+        self._setup_bundle_entry_selector(entry)
+        self.load_text_editor_file(str(text_path), ".material", from_bundle_entry=True)
+        self.root.after_idle(self._tag_material_texture_links)
+
+    def open_palette_editor(self, entry, session):
+        try:
+            binary_path, text_path = self._entry_binary_editor_paths(entry, session, ".palette.txt")
+            source_blob = binary_path.read_bytes()
+            rendered = PALETTE_TEXT_TOOL.decode_palette(
+                source_blob,
+                self._bundle_entry_display_name(entry),
+            )
+            text_path.write_text(rendered, encoding="utf-8", newline="\n")
+        except Exception as exc:
+            messagebox.showerror("Open Palette", f"Failed to decode type-13 palette:\n{exc}")
+            return
+        self.bundle_entry_edit = {
+            "bundle_path": session["bundle_path"],
+            "entry": dict(entry),
+            "replacement_dir": session["replacement_dir"],
+            "temp_path": str(binary_path),
+            "text_path": str(text_path),
+            "palette_original": source_blob,
+        }
+        self._setup_bundle_entry_selector(entry)
+        self.load_text_editor_file(str(text_path), ".palette", from_bundle_entry=True)
+        self.root.after_idle(self._tag_palette_color_swatches)
+
+    def _tag_palette_color_swatches(self):
+        if self.text_mode != "palette":
+            return
+        for tag in self.output_text.tag_names():
+            if tag.startswith("palette_swatch_"):
+                self.output_text.tag_delete(tag)
+        text = self.output_text.get("1.0", tk.END)
+        for index, match in enumerate(re.finditer(r"#[0-9A-Fa-f]{8}", text)):
+            value = match.group(0)[1:]
+            red, green, blue = (int(value[pos:pos + 2], 16) for pos in (0, 2, 4))
+            foreground = "#000000" if (red * 299 + green * 587 + blue * 114) >= 145000 else "#ffffff"
+            start = f"1.0+{match.start()}c"
+            end = f"1.0+{match.end()}c"
+            tag = f"palette_swatch_{index}"
+            self.output_text.tag_add(tag, start, end)
+            self.output_text.tag_configure(tag, background=f"#{value[:6]}", foreground=foreground)
+            self.output_text.tag_raise(tag)
+
+    @staticmethod
+    def _asset_name_tokens(name):
+        stem = Path(str(name).replace('\\', '/')).name.lower()
+        stem = stem.removesuffix('.resource')
+        return {
+            token for token in re.split(r"[^a-z0-9]+", stem)
+            if len(token) >= 3 and not token.isdigit() and token not in {"material", "texture", "map"}
+        }
+
+    def _related_texture_entries_for_material(self, material_entry):
+        textures = self._texture_preview_entries()
+        if not textures:
+            return []
+        material_tokens = self._asset_name_tokens(material_entry.get("name", ""))
+        material_index = next(
+            (index for index, item in enumerate(self.parsed_files) if item is material_entry or (
+                item.get("file_num") == material_entry.get("file_num")
+                and item.get("offset") == material_entry.get("offset")
+            )),
+            -1,
+        )
+        adjacent_texture_indices = set()
+        if material_index >= 0:
+            for index in range(material_index + 1, len(self.parsed_files)):
+                item = self.parsed_files[index]
+                if item.get("file_type") not in {9, 13}:
+                    break
+                if self._is_texture_preview_entry(item):
+                    adjacent_texture_indices.add(index)
+        scored = []
+        for texture in textures:
+            texture_tokens = self._asset_name_tokens(texture.get("name", ""))
+            overlap = len(material_tokens & texture_tokens)
+            texture_index = self.parsed_files.index(texture)
+            follows_material = texture_index in adjacent_texture_indices
+            score = (overlap * 20 if overlap >= 2 else 0) + (30 if follows_material else 0)
+            if score:
+                score -= min(abs(texture_index - material_index), 15)
+                scored.append((score, texture_index, texture))
+        scored.sort(key=lambda item: (-item[0], item[1]))
+        return [item[2] for item in scored[:4]]
+
+    def _related_material_entries_for_texture(self, texture_entry):
+        identity = (texture_entry.get("file_num"), texture_entry.get("offset"))
+        related = []
+        for material in self.parsed_files:
+            if not self._is_material_entry(material):
+                continue
+            candidates = self._related_texture_entries_for_material(material)
+            if any((item.get("file_num"), item.get("offset")) == identity for item in candidates):
+                related.append(material)
+        return related
+
+    def _tag_material_texture_links(self):
+        if self.text_mode != "material" or not self.bundle_entry_edit:
+            return
+        related = self.bundle_entry_edit.get("material_related_textures", [])
+        for index, entry in enumerate(related):
+            name = str(entry.get("name", ""))
+            start = self.output_text.search(name, "1.0", tk.END, exact=True)
+            if not start:
+                continue
+            end = f"{start}+{len(name)}c"
+            tag = f"material_texture_link_{index}"
+            self.output_text.tag_add(tag, start, end)
+            self.output_text.tag_configure(tag, foreground=self._bundle_entry_link_color(entry), underline=True)
+            self.output_text.tag_bind(tag, "<Enter>", lambda _event: self.output_text.config(cursor="hand2"))
+            self.output_text.tag_bind(tag, "<Leave>", lambda _event: self.output_text.config(cursor=""))
+            self.output_text.tag_bind(tag, "<Button-1>", lambda _event, e=dict(entry): self._open_related_texture_from_material(e))
+        self._raise_material_texture_links()
+        self.root.after(250, self._raise_material_texture_links)
+        self.root.after(1000, self._raise_material_texture_links)
+
+    def _raise_material_texture_links(self):
+        if self.text_mode != "material":
+            return
+        for tag in self.output_text.tag_names():
+            if tag.startswith("material_texture_link_"):
+                self.output_text.tag_raise(tag)
+
+    def _open_related_texture_from_material(self, entry):
+        if self._editor_has_unsaved_text_changes():
+            choice = messagebox.askyesnocancel(
+                "Unsaved Material",
+                "Save the material changes before opening its texture?",
+            )
+            if choice is None:
+                return
+            if choice and not self.save_bundle_entry_edit():
+                return
+        self.open_texture_preview(entry)
+
+    def _tag_texture_material_links(self, related):
+        for index, entry in enumerate(related):
+            name = str(entry.get("name", ""))
+            start = self.output_text.search(name, "1.0", tk.END, exact=True)
+            if not start:
+                continue
+            end = f"{start}+{len(name)}c"
+            tag = f"texture_material_link_{index}"
+            self.output_text.tag_add(tag, start, end)
+            self.output_text.tag_configure(tag, foreground=self._bundle_entry_link_color(entry), underline=True)
+            self.output_text.tag_bind(tag, "<Enter>", lambda _event: self.output_text.config(cursor="hand2"))
+            self.output_text.tag_bind(tag, "<Leave>", lambda _event: self.output_text.config(cursor=""))
+            self.output_text.tag_bind(tag, "<Button-1>", lambda _event, e=dict(entry): self.open_bundle_entry_editor(e))
+
+    def _camera_path_endian(self, data):
+        for endian in ('>', '<'):
+            if len(data) < 64:
+                continue
+            count = struct.unpack_from(f"{endian}I", data, 0x28)[0]
+            total_size = struct.unpack_from(f"{endian}I", data, 0x2C)[0]
+            data_offset = struct.unpack_from(f"{endian}I", data, 0x30)[0]
+            if total_size == len(data) and data_offset == 64 and count == (len(data) - 64) // 4:
+                return endian
+        raise ValueError("Type-21 header does not match a supported camera/path layout")
+
+    def _camera_path_to_text(self, data, entry_name="CameraPath"):
+        endian = self._camera_path_endian(data)
+        endian_name = "big" if endian == '>' else "little"
+        enabled = data[0x04]
+        animated = data[0x08]
+        near_clip = struct.unpack_from(f"{endian}f", data, 0x1C)[0]
+        far_clip = struct.unpack_from(f"{endian}f", data, 0x20)[0]
+        camera_parameter = struct.unpack_from(f"{endian}f", data, 0x24)[0]
+        count = struct.unpack_from(f"{endian}I", data, 0x28)[0]
+        track_id = struct.unpack_from(f"{endian}H", data, 0x34)[0]
+        lines = [
+            "# Pipeworks type-21 intro-camera field-of-view track",
+            f"# Entry={entry_name}",
+            f"# Endian={endian_name}",
+            "# FieldOfView values are stored in radians; degree comments are provided for readability.",
+            "# To extend the track, duplicate the last frame and increment its Frame index.",
+            "# Frame offsets, FrameCount, TotalSize, and degree comments are regenerated when saved.",
+            "",
+            "camera_fov_track",
+            "{",
+            "    camera_settings",
+            "    {",
+            f"        @0x0004 u8 Enabled = {enabled};",
+            f"        @0x0008 u8 Animated = {animated};",
+            f"        @0x001C float NearClipDistance = {near_clip!r};",
+            f"        @0x0020 float FarClipDistance = {far_clip!r};",
+            f"        @0x0024 float UnknownCameraParameter = {camera_parameter!r};",
+            f"        @0x0034 u16 TrackId = {track_id};",
+            "",
+            f"        @0x0028 u32 FrameCount = {count};  # structural",
+            f"        @0x002C u32 TotalSize = {len(data)};  # structural",
+            "        @0x0030 u32 FrameDataOffset = 64;  # structural",
+            "",
+            f"        # Unknown/reserved header bytes: {data[0:4].hex(' ')} | "
+            f"{data[5:8].hex(' ')} | {data[9:0x1C].hex(' ')} | {data[0x36:0x40].hex(' ')}",
+            "    }",
+            "",
+            "    frames",
+            "    {",
+        ]
+        for index in range(count):
+            offset = 64 + index * 4
+            value = struct.unpack_from(f"{endian}f", data, offset)[0]
+            degrees = math.degrees(value)
+            lines.append(
+                f"        @0x{offset:04X} float Frame[{index:03d}].FieldOfView = {value!r};"
+                f"  # {degrees:.3f} degrees"
+            )
+        lines.extend(("    }", "}"))
+        return "\n".join(lines) + "\n"
+
+    def _camera_path_from_text(self, text, original_data):
+        endian = self._camera_path_endian(original_data)
+        output = bytearray(original_data[:64])
+        row_re = re.compile(
+            r"^\s*@0x([0-9A-Fa-f]+)\s+(u8|u16|u32|float)\s+[^=]+?\s*=\s*([^;#]+)",
+            re.MULTILINE,
+        )
+        seen = set()
+        for match in row_re.finditer(text):
+            offset = int(match.group(1), 16)
+            value_type = match.group(2)
+            if offset >= 64:
+                continue
+            if offset in seen:
+                raise ValueError(f"Duplicate camera/path offset 0x{offset:04X}")
+            seen.add(offset)
+            value_size = {"u8": 1, "u16": 2, "u32": 4, "float": 4}[value_type]
+            if offset < 0 or offset + value_size > len(output):
+                raise ValueError(f"Invalid camera/path offset 0x{offset:X}")
+            if offset in {0x28, 0x2C, 0x30}:
+                continue
+            if offset in {0x04, 0x08}:
+                expected_type = "u8"
+            elif offset == 0x34:
+                expected_type = "u16"
+            elif offset in {0x1C, 0x20, 0x24} or offset >= 64:
+                expected_type = "float"
+            else:
+                expected_type = "u32"
+            if value_type != expected_type:
+                raise ValueError(
+                    f"Field at 0x{offset:04X} must remain {expected_type}, not {value_type}"
+                )
+            if value_type == "float":
+                struct.pack_into(f"{endian}f", output, offset, float(match.group(3).strip()))
+            elif value_type == "u8":
+                struct.pack_into("B", output, offset, int(match.group(3).strip(), 0) & 0xFF)
+            elif value_type == "u16":
+                struct.pack_into(f"{endian}H", output, offset, int(match.group(3).strip(), 0) & 0xFFFF)
+            else:
+                struct.pack_into(f"{endian}I", output, offset, int(match.group(3).strip(), 0) & 0xFFFFFFFF)
+
+        frame_re = re.compile(
+            r"^\s*@0x[0-9A-Fa-f]+\s+float\s+Frame\[(\d+)\]\.FieldOfView\s*=\s*([^;#]+)",
+            re.MULTILINE,
+        )
+        frames = {}
+        for match in frame_re.finditer(text):
+            index = int(match.group(1), 10)
+            if index in frames:
+                raise ValueError(f"Frame[{index:03d}] is declared more than once")
+            frames[index] = float(match.group(2).strip())
+        if not frames:
+            raise ValueError("The camera FOV track must contain at least one frame")
+        expected = list(range(max(frames) + 1))
+        missing = [index for index in expected if index not in frames]
+        if missing:
+            preview = ", ".join(f"Frame[{index:03d}]" for index in missing[:8])
+            raise ValueError(f"Camera frame indexes must be continuous; missing {preview}")
+        for index in expected:
+            output.extend(struct.pack(f"{endian}f", frames[index]))
+        struct.pack_into(f"{endian}I", output, 0x28, len(frames))
+        struct.pack_into(f"{endian}I", output, 0x2C, len(output))
+        struct.pack_into(f"{endian}I", output, 0x30, 64)
+        self._camera_path_endian(output)
+        return bytes(output)
+
+    def open_camera_path_editor(self, entry, session):
+        try:
+            temp_path, text_path = self._entry_binary_editor_paths(entry, session, ".camera_path.txt")
+            data = temp_path.read_bytes()
+            text_path.write_text(self._camera_path_to_text(data, entry.get("name", "CameraPath")), encoding="utf-8", newline="\n")
+        except Exception as exc:
+            messagebox.showerror("Camera/Path", f"Failed to decode camera/path entry:\n{exc}")
+            return
+        self.bundle_entry_edit = {
+            "bundle_path": session["bundle_path"],
+            "entry": dict(entry),
+            "replacement_dir": session["replacement_dir"],
+            "temp_path": str(temp_path),
+            "text_path": str(text_path),
+            "camera_path_original": data,
+        }
+        self._setup_bundle_entry_selector(entry)
+        self.load_text_editor_file(str(text_path), ".camera_path", from_bundle_entry=True)
+
+    def _read_fixed_ascii(self, data, offset, size):
+        return data[offset:offset + size].split(b"\0", 1)[0].decode("latin-1", errors="replace")
+
+    def _fdf_layout_guess(self, data, big_endian):
+        del big_endian
+        terminator = data.find(b"\0", 0x358)
+        if terminator < 0:
+            terminator = 0x358
+        first_possible = (terminator + 4) & ~3
+        candidates = []
+        for stride in (36, 52):
+            for start in range(first_possible, min(len(data), first_possible + 0x24), 4):
+                remaining = len(data) - start
+                if remaining <= 0 or remaining % stride:
+                    continue
+                count = remaining // stride
+                if not (1 <= count <= 512):
+                    continue
+                padding_penalty = sum(byte != 0 for byte in data[terminator + 1:start])
+                candidates.append((padding_penalty * 8 + start - first_possible, start, stride, count))
+        return min(candidates, default=(0, len(data), 0, 0))[1:]
+
+    def _fdf_to_text(self, data, entry_name="Font", big_endian=False):
+        record_start, record_stride, record_count = self._fdf_layout_guess(data, big_endian)
+        character_region = data[0x358:].split(b"\0", 1)[0]
+        characters = character_region.decode("latin-1", errors="replace")
+        lines = [
+            "# Pipeworks FDF font viewer (read-only)",
+            f"# Entry={entry_name}",
+            "",
+            "font",
+            "{",
+            f"    InternalName = {self._read_fixed_ascii(data, 0x000, 0x100)!r};",
+            f"    AtlasFile = {self._read_fixed_ascii(data, 0x100, 0x100)!r};",
+            f"    FontRecipe = {self._read_fixed_ascii(data, 0x200, 0x100)!r};",
+            f"    Characters = {characters!r};",
+            f"    GlyphRecordOffset = 0x{record_start:04X};",
+            f"    GlyphRecordSize = {record_stride};",
+            f"    GlyphRecordCount = {record_count};",
+            "",
+            "    glyph_records",
+            "    {",
+        ]
+        # FDF glyph records use little-endian fields on both Wii and PS2.
+        endian = '<'
+        for index in range(record_count):
+            offset = record_start + index * record_stride
+            if record_stride == 36:
+                u_left, u_right, v_top, v_bottom, scale, width, x_offset, height, codepoint = struct.unpack_from(
+                    f"{endian}8fI", data, offset
+                )
+                character = chr(codepoint) if 0 <= codepoint <= 0x10FFFF else "?"
+                lines.extend((
+                    f"        glyph {character!r}  # U+{codepoint:04X}, record @0x{offset:04X}",
+                    "        {",
+                    f"            UV = ({u_left:.9g}, {v_top:.9g}) to ({u_right:.9g}, {v_bottom:.9g});",
+                    f"            PixelSize = ({width:.9g}, {height:.9g});",
+                    f"            Scale = {scale:.9g};",
+                    f"            XOffset = {x_offset:.9g};",
+                    "        }",
+                ))
+            else:
+                words = [struct.unpack_from(f"{endian}I", data, pos)[0] for pos in range(offset, offset + record_stride, 4)]
+                character = characters[index] if index < len(characters) else "?"
+                word_text = ", ".join(f"0x{word:08X}" for word in words)
+                lines.append(f"        [{index:03d}] {character!r} @0x{offset:04X} = {word_text};")
+        lines.extend(("    }", "}"))
+        return "\n".join(lines) + "\n"
+
+    def open_fdf_viewer(self, entry, session):
+        if not HAS_FDF_TEXT_TOOL:
+            messagebox.showerror("FDF Font", "The editable FDF codec could not be loaded.")
+            return
+        try:
+            temp_path, text_path = self._entry_binary_editor_paths(entry, session, ".fdf.txt")
+            data = temp_path.read_bytes()
+            text_path.write_text(
+                FDF_TEXT_TOOL.decode_fdf(data, entry.get("name", "Font")),
+                encoding="utf-8",
+                newline="\n",
+            )
+        except Exception as exc:
+            messagebox.showerror("FDF Font", f"Failed to decode FDF entry:\n{exc}")
+            return
+        self.bundle_entry_edit = {
+            "bundle_path": session["bundle_path"],
+            "entry": dict(entry),
+            "replacement_dir": session["replacement_dir"],
+            "temp_path": str(temp_path),
+            "text_path": str(text_path),
+            "fdf_original": data,
+        }
+        self._setup_bundle_entry_selector(entry)
+        self.load_text_editor_file(str(text_path), ".fdf", from_bundle_entry=True)
 
     def _character_data_text_name(self, data_label=None):
         label = data_label
@@ -9381,6 +12570,7 @@ class PipeworksGUI:
         replacement_dir = session["replacement_dir"]
         entry_copy = dict(entry)
         parser = self.parser
+        skeleton_endian = "big" if getattr(parser, "is_big_endian", False) else "little"
         self._setup_bundle_entry_selector(entry)
         self._begin_busy_progress(f"{skeleton_label}:")
         self.extract_btn.config(state=tk.DISABLED)
@@ -9414,6 +12604,7 @@ class PipeworksGUI:
                     "skeleton_type3": True,
                     "skeleton_type3_label": skeleton_label,
                     "skeleton_type3_tool": SKELETON_TYPE3_TOOL,
+                    "skeleton_endian": skeleton_endian,
                 }
                 self.load_text_editor_file(str(text_path), ".skeleton_type3", from_bundle_entry=True)
                 self._setup_bundle_entry_selector(entry_copy)
@@ -9422,7 +12613,7 @@ class PipeworksGUI:
 
         threading.Thread(target=decode_worker, daemon=True).start()
 
-    def save_bundle_entry_edit(self):
+    def save_bundle_entry_edit(self, selected_names=None):
         if not self.bundle_entry_edit:
             return False
         if not self.parser or not self.parsed_files:
@@ -9433,11 +12624,33 @@ class PipeworksGUI:
         temp_output = str(get_temp_dir() / f"{Path(output_path).name}.rebuild_tmp")
 
         replacement_dir = self.bundle_entry_edit["replacement_dir"]
+        excluded_files = []
+        excluded_dir = None
+        if selected_names is not None:
+            selected = set(selected_names)
+            excluded_dir = Path(tempfile.mkdtemp(prefix="gzbuildr_excluded_", dir=get_temp_dir()))
+            for name in self._changed_bundle_entry_names():
+                if name in selected:
+                    continue
+                source = Path(replacement_dir) / name
+                if not source.exists():
+                    continue
+                held = excluded_dir / name
+                held.parent.mkdir(parents=True, exist_ok=True)
+                shutil.move(str(source), str(held))
+                excluded_files.append((held, source))
         self.parser._extra_string_values = list(getattr(self, "_pending_prx_string_values", []) or [])
-        if self.parser.bundle_type == 'vol':
-            success = self.parser.rebuild_vol(temp_output, self.parsed_files, replacement_dir)
-        else:
-            success = self.parser.rebuild_bdg(temp_output, self.parsed_files, replacement_dir)
+        try:
+            if self.parser.bundle_type == 'vol':
+                success = self.parser.rebuild_vol(temp_output, self.parsed_files, replacement_dir)
+            else:
+                success = self.parser.rebuild_bdg(temp_output, self.parsed_files, replacement_dir)
+        finally:
+            for held, source in excluded_files:
+                source.parent.mkdir(parents=True, exist_ok=True)
+                shutil.move(str(held), str(source))
+            if excluded_dir is not None:
+                shutil.rmtree(excluded_dir, ignore_errors=True)
         self.parser._extra_string_values = []
         self._pending_prx_string_values = []
 
@@ -9581,8 +12794,8 @@ class PipeworksGUI:
             f"# SourcePRX={filepath}",
             f"# SourceBDG={source_bdg or ''}",
             f"# PRX={Path(filepath).name}",
-            "# Edit assignment values, then Save or Convert back to PRX.",
-            "# Format: @offset <type> <name> = <value>",
+            "# Edit values inside property_set blocks, then Save or Convert back to PRX.",
+            "# Shared values are detached automatically when only one property is changed.",
             "",
         ]
         if warning:
@@ -9710,6 +12923,30 @@ class PipeworksGUI:
             )
             reusable_pointer_gap = max(0, first_row_after_pointers - pointer_end)
             pointer_bytes_needed = 4 * add_count
+
+            # Most tables reserve one or more unused pointer slots before the
+            # first row. Use that space and append the new row records so no
+            # existing table, row, or relative reference has to move.
+            if reusable_pointer_gap >= pointer_bytes_needed:
+                row_insert_at = len(prx) - 4 if prx.endswith(b"\xAF\xAF\xAF\xAF") else len(prx)
+                trailing_bytes = bytes(prx[row_insert_at:])
+                del prx[row_insert_at:]
+                new_count = count + add_count
+                PRX_VALUE_EDITOR.put_u32(prx, table_offset + 4, (new_count << 16) | new_count)
+                for index, addition in enumerate(group_additions):
+                    new_row_off = len(prx)
+                    name_id = strings.index(addition["name"])
+                    pointer_offset = table_offset + 8 + (count + index) * 4
+                    PRX_VALUE_EDITOR.put_u32(prx, pointer_offset, new_row_off - table_offset + 4)
+                    prx.extend(b"\x00" * 12)
+                    PRX_VALUE_EDITOR.put_u32(prx, new_row_off, addition["type_id"])
+                    PRX_VALUE_EDITOR.put_u32(prx, new_row_off + 4, addition["value_raw"])
+                    PRX_VALUE_EDITOR.put_u32(prx, new_row_off + 8, name_id)
+                prx.extend(trailing_bytes)
+                prx_entry = {"name": "edited.prx", "offset": 0, "size": len(prx)}
+                _parsed_prx, rows, _roots = PRX_VALUE_EDITOR.parse_rows(prx, prx_entry, strings)
+                continue
+
             reusable_pointer_bytes = min(reusable_pointer_gap, pointer_bytes_needed)
             insert_at = pointer_end + reusable_pointer_bytes
             delta = pointer_bytes_needed + (12 * add_count) - reusable_pointer_bytes
@@ -9732,16 +12969,33 @@ class PipeworksGUI:
                     new_row_off = shifted(old_row_off, insert_at, delta)
                     PRX_VALUE_EDITOR.put_u32(prx, new_table + 8 + index * 4, new_row_off - new_table + 4)
 
-            for row in old_rows:
-                if row.type_id not in (PRX_VALUE_EDITOR.TYPE_REF_A, PRX_VALUE_EDITOR.TYPE_REF_B):
+            ref_rows = {
+                row.row_offset: row.value_raw
+                for row in old_rows
+                if PRX_VALUE_EDITOR.is_ref_type(row.type_id)
+            }
+            # Root descriptors precede the first property table and are not
+            # returned as normal rows. They still carry relative table
+            # pointers and must move whenever an insertion shifts a table.
+            first_table = min(old_table_offsets, default=len(old_prx))
+            old_table_offset_set = set(old_table_offsets)
+            for row_offset in range(0, max(0, first_table - 11), 4):
+                if not PRX_VALUE_EDITOR.is_ref_type(PRX_VALUE_EDITOR.u32(old_prx, row_offset)):
                     continue
-                old_target = row.row_offset + PRX_VALUE_EDITOR.signed32(row.value_raw)
+                value_raw = PRX_VALUE_EDITOR.u32(old_prx, row_offset + 4)
+                target = row_offset + PRX_VALUE_EDITOR.signed32(value_raw)
+                if target not in old_table_offset_set and target + 4 not in old_table_offset_set:
+                    continue
+                ref_rows[row_offset] = value_raw
+
+            for old_row_offset, value_raw in ref_rows.items():
+                old_target = old_row_offset + PRX_VALUE_EDITOR.signed32(value_raw)
                 if (
                     PRX_VALUE_EDITOR.table_count_at(old_prx, old_target) is None
                     and PRX_VALUE_EDITOR.table_count_at(old_prx, old_target + 4) is not None
                 ):
                     old_target += 4
-                new_row_off = shifted(row.row_offset, insert_at, delta)
+                new_row_off = shifted(old_row_offset, insert_at, delta)
                 new_target = shifted(old_target, insert_at, delta)
                 PRX_VALUE_EDITOR.put_u32(prx, new_row_off + 4, new_target - new_row_off)
 
@@ -9759,6 +13013,47 @@ class PipeworksGUI:
 
             prx_entry = {"name": "edited.prx", "offset": 0, "size": len(prx)}
             _parsed_prx, rows, _roots = PRX_VALUE_EDITOR.parse_rows(prx, prx_entry, strings)
+
+        return prx
+
+    def _apply_prx_occurrence_edits(self, prx, rows, wanted_by_slot):
+        """Apply logical property edits, cloning shared physical rows as needed."""
+        if not wanted_by_slot:
+            return prx
+
+        rows_by_slot = {row.pointer_offset: row for row in rows}
+        slots_by_row = {}
+        for row in rows:
+            slots_by_row.setdefault(row.row_offset, set()).add(row.pointer_offset)
+
+        edits_by_row = {}
+        for pointer_offset, new_raw in wanted_by_slot.items():
+            row = rows_by_slot[pointer_offset]
+            if new_raw == row.value_raw:
+                continue
+            edits_by_row.setdefault(row.row_offset, []).append((row, new_raw))
+
+        for row_offset, edits in sorted(edits_by_row.items()):
+            all_slots = slots_by_row.get(row_offset, set())
+            edited_slots = {row.pointer_offset for row, _new_raw in edits}
+            edited_values = {new_raw for _row, new_raw in edits}
+
+            if edited_slots == all_slots and len(edited_values) == 1:
+                PRX_VALUE_EDITOR.put_u32(prx, row_offset + 4, next(iter(edited_values)))
+                continue
+
+            edits_by_value = {}
+            for row, new_raw in edits:
+                edits_by_value.setdefault(new_raw, []).append(row)
+
+            for new_raw, value_rows in edits_by_value.items():
+                insert_at = len(prx) - 4 if prx.endswith(b"\xAF\xAF\xAF\xAF") else len(prx)
+                clone = bytearray(prx[row_offset : row_offset + 12])
+                PRX_VALUE_EDITOR.put_u32(clone, 4, new_raw)
+                prx[insert_at:insert_at] = clone
+                for row in value_rows:
+                    relative = insert_at - row.table_offset + 4
+                    PRX_VALUE_EDITOR.put_u32(prx, row.pointer_offset, relative)
 
         return prx
 
@@ -9899,20 +13194,34 @@ class PipeworksGUI:
                     rows_by_key[key] = row
             wanted_by_off = {}
             wanted_detail_by_off = {}
+            wanted_by_slot = {}
             additions_by_key = {}
+            seen_code_keys = {}
             new_strings = [] if self.bundle_entry_edit else None
             conflicts = []
             shared_conflicts = {}
             row_re = re.compile(r"^@0x([0-9A-Fa-f]+)\s+([a-zA-Z0-9_]+)\s+(.+?)\s+=\s+(.*)$")
             code_row_re = re.compile(r"^(?:(float|int|string|ref)\s+)?([A-Za-z_][A-Za-z0-9_.# -]*?)\s*=\s*(.*)$")
+            property_set_re = re.compile(r"^property_set\s+(.+?)\s*\{")
+            current_property_set = None
 
             for line_no, line in enumerate(self._current_editor_text().splitlines(), start=1):
                 stripped = line.strip()
                 if not stripped or stripped.startswith("#") or stripped.startswith("["):
                     continue
 
+                set_match = property_set_re.match(stripped)
+                if set_match:
+                    current_property_set = set_match.group(1).strip()
+                    continue
+                if stripped == "}":
+                    current_property_set = None
+                    continue
+                stripped = stripped.rstrip(";").rstrip()
+
                 old_match = row_re.match(stripped)
                 code_match = None if old_match else code_row_re.match(stripped)
+                occurrence_edit = False
                 if old_match:
                     row_off = int(old_match.group(1), 16)
                     type_name = old_match.group(2)
@@ -9923,10 +13232,20 @@ class PipeworksGUI:
                 elif code_match:
                     type_name = code_match.group(1)
                     key = code_match.group(2).strip()
+                    if current_property_set and not key.lower().startswith(f"{current_property_set.lower()}."):
+                        key = f"{current_property_set}.{key}"
                     value_text = self._strip_prx_inline_comment(code_match.group(3))
                     if type_name == "ref":
                         continue
                     lookup_key = key.lower()
+                    previous_line = seen_code_keys.get(lookup_key)
+                    if previous_line is not None:
+                        conflicts.append(
+                            f"{key} is declared more than once (lines {previous_line} and {line_no}); "
+                            "edit the existing property instead of adding a duplicate line"
+                        )
+                        continue
+                    seen_code_keys[lookup_key] = line_no
                     if lookup_key in duplicate_keys:
                         conflicts.append(f"{key} is ambiguous; use an @0x offset row for this value")
                         continue
@@ -9959,12 +13278,16 @@ class PipeworksGUI:
                         continue
                     if type_name and row.type_name != type_name:
                         continue
+                    occurrence_edit = True
                 else:
                     continue
                 if row.type_id not in PRX_VALUE_EDITOR.EDITABLE_TYPES:
                     continue
 
                 new_raw = self._parse_prx_value(row, value_text, strings, new_strings) & 0xFFFFFFFF
+                if occurrence_edit:
+                    wanted_by_slot[row.pointer_offset] = new_raw
+                    continue
                 previous = wanted_by_off.get(row.row_offset)
                 if previous is not None and previous != new_raw:
                     items = shared_conflicts.setdefault(row.row_offset, [])
@@ -9999,6 +13322,7 @@ class PipeworksGUI:
             for row_off, new_raw in sorted(wanted_by_off.items()):
                 PRX_VALUE_EDITOR.put_u32(prx, row_off + 4, new_raw)
 
+            prx = self._apply_prx_occurrence_edits(prx, rows, wanted_by_slot)
             prx = self._add_named_prx_rows(prx, rows, strings, list(additions_by_key.values()))
 
             Path(output_path).write_bytes(prx)
@@ -10014,9 +13338,93 @@ class PipeworksGUI:
             return "EDF codec is missing. Expected edf_dump_codec.py.\n"
         return dump_to_editable(Path(filepath).read_bytes(), load_field_names())
 
+    def _remove_xml_formatting_nodes(self, node):
+        for child in list(node.childNodes):
+            if child.nodeType == child.TEXT_NODE and not child.data.strip():
+                node.removeChild(child)
+                child.unlink()
+            elif child.hasChildNodes():
+                self._remove_xml_formatting_nodes(child)
+
+    def _format_ifc_text(self, text):
+        document = minidom.parseString(text.encode("utf-8"))
+        self._remove_xml_formatting_nodes(document)
+        pretty = document.toprettyxml(indent="    ", newl="\n")
+        return "\n".join(line for line in pretty.splitlines() if line.strip()) + "\n"
+
+    def _compact_ifc_text(self, text):
+        document = minidom.parseString(text.encode("utf-8"))
+        self._remove_xml_formatting_nodes(document)
+        compact = document.toxml()
+        return re.sub(r'^<\?xml version="1\.0" \?>', '<?xml version="1.0"?>', compact)
+
+    def _finish_text_editor_load(self, loaded_text):
+        self.monster_data_disassembly_generation += 1
+        self.output_text.edit_reset()
+        self.output_text.edit_modified(False)
+        self.configure_syntax_tags()
+        self.configure_editor_diff_tags()
+        self.setup_root_table_folds()
+        self._sync_editor_diff_baseline(loaded_text)
+        self.loading_text_editor = False
+        self.extract_btn.config(state=tk.NORMAL)
+        self.rebuild_btn.config(state=tk.NORMAL)
+        is_monster_data = bool(
+            self.bundle_entry_edit
+            and self.bundle_entry_edit.get("character_data_label") == "000MONSTER_DATA"
+            and self.text_mode == "char_data"
+        )
+        if is_monster_data:
+            self.monster_data_disassembly_active = False
+            self.monster_data_editable_text = loaded_text.rstrip("\n") + "\n"
+            self.monster_data_editable_baseline = None
+            self.monster_data_disassembly_baseline = None
+            self.extract_btn.config(text="Block View")
+        else:
+            self.monster_data_disassembly_active = False
+            self.monster_data_editable_text = None
+            self.monster_data_editable_baseline = None
+            self.monster_data_disassembly_baseline = None
+            if self.text_mode == "fdf":
+                self.extract_btn.config(text="Atlas Preview")
+            elif self.text_mode == "palette":
+                self.extract_btn.config(text="Export TXT")
+        if self.text_mode == "pvm":
+            self.start_visible_syntax_highlight_only()
+        else:
+            self.start_lazy_syntax_highlight()
+
+    def _insert_large_editor_text(self, loaded_text):
+        """Insert a large decoded export without monopolizing Tk's event loop."""
+        lines = loaded_text.splitlines(keepends=True)
+        chunk_lines = 750
+        next_line = 0
+        load_generation = self.editor_load_generation
+        self.extract_btn.config(state=tk.DISABLED)
+        self.rebuild_btn.config(state=tk.DISABLED)
+        self.output_text.configure(undo=False)
+
+        def insert_next_chunk():
+            nonlocal next_line
+            if not self.loading_text_editor or load_generation != self.editor_load_generation:
+                self.output_text.configure(undo=True)
+                return
+            end_line = min(len(lines), next_line + chunk_lines)
+            self.output_text.insert(tk.END, "".join(lines[next_line:end_line]))
+            next_line = end_line
+            if next_line < len(lines):
+                self.root.after(1, insert_next_chunk)
+                return
+            self.output_text.configure(undo=True)
+            self._finish_text_editor_load(loaded_text)
+
+        self.root.after(0, insert_next_chunk)
+
     def load_text_editor_file(self, filepath, ext, from_bundle_entry=False):
-        """Load BSF/TXT/IFC/XFG/PRX/EDF/PVM/decoded data files into the editable status box."""
+        """Load BSF/TXT/IFC/IFL/XFG/PRX/EDF/PVM/LOC/decoded data files into the editable status box."""
         self.cancel_lazy_syntax_highlight()
+        self._hide_find_bar_completely()
+        self.editor_load_generation += 1
         self.loading_text_editor = True
         if not from_bundle_entry:
             self.parser = None
@@ -10036,6 +13444,7 @@ class PipeworksGUI:
         self.extract_btn.config(text="Convert")
         self.rebuild_btn.config(text="Save")
 
+        self.output_text.config(state=tk.NORMAL)
         self.output_text.delete(1.0, tk.END)
         loaded_text = None
 
@@ -10104,12 +13513,33 @@ class PipeworksGUI:
                 data = Path(filepath).read_bytes()
                 if not is_pwk_vm_module(data):
                     raise ValueError("This .pvm does not use the PWK Virtual machine module header.")
+                parse_pvm(data)
                 loaded_text = pvm_to_editable(data, Path(filepath))
                 self.output_text.insert(tk.END, loaded_text)
                 self.output_text.edit_reset()
                 self.output_text.edit_modified(False)
             except Exception as exc:
                 self.output_text.insert(tk.END, f"Failed to inspect PVM:\n{exc}\n")
+                self.extract_btn.config(state=tk.DISABLED)
+                self.rebuild_btn.config(state=tk.DISABLED)
+                self.loading_text_editor = False
+                return
+            self.extract_btn.config(state=tk.NORMAL)
+            self.rebuild_btn.config(state=tk.NORMAL)
+        elif ext == '.loc':
+            if not HAS_LOC_TEXT_TOOL:
+                self.output_text.insert(tk.END, "LOC localization tool is missing. Cannot decode LOC.\n")
+                self.extract_btn.config(state=tk.DISABLED)
+                self.rebuild_btn.config(state=tk.DISABLED)
+                self.loading_text_editor = False
+                return
+            try:
+                loaded_text = loc_to_editable(Path(filepath).read_bytes())
+                self.output_text.insert(tk.END, loaded_text)
+                self.output_text.edit_reset()
+                self.output_text.edit_modified(False)
+            except Exception as exc:
+                self.output_text.insert(tk.END, f"Failed to decode LOC:\n{exc}\n")
                 self.extract_btn.config(state=tk.DISABLED)
                 self.rebuild_btn.config(state=tk.DISABLED)
                 self.loading_text_editor = False
@@ -10127,11 +13557,8 @@ class PipeworksGUI:
                 self.loading_text_editor = False
                 return
             loaded_text = text
-            self.output_text.insert(tk.END, loaded_text)
-            self.output_text.edit_reset()
-            self.output_text.edit_modified(False)
-            self.extract_btn.config(state=tk.NORMAL)
-            self.rebuild_btn.config(state=tk.NORMAL)
+            self._insert_large_editor_text(loaded_text)
+            return
         elif ext == '.skeleton_type3':
             try:
                 text = Path(filepath).read_text(encoding='utf-8', errors='replace')
@@ -10148,6 +13575,21 @@ class PipeworksGUI:
             self.output_text.edit_modified(False)
             self.extract_btn.config(state=tk.NORMAL)
             self.rebuild_btn.config(state=tk.NORMAL)
+        elif ext == '.ifc':
+            try:
+                text = Path(filepath).read_text(encoding='utf-8', errors='strict')
+                loaded_text = self._format_ifc_text(text)
+            except Exception as exc:
+                self.output_text.insert(tk.END, f"Failed to format IFC markup:\n{exc}\n")
+                self.extract_btn.config(state=tk.DISABLED)
+                self.rebuild_btn.config(state=tk.DISABLED)
+                self.loading_text_editor = False
+                return
+            self.output_text.insert(tk.END, loaded_text)
+            self.output_text.edit_reset()
+            self.output_text.edit_modified(False)
+            self.extract_btn.config(state=tk.DISABLED)
+            self.rebuild_btn.config(state=tk.NORMAL)
         else:
             try:
                 text = Path(filepath).read_text(encoding='utf-8', errors='replace')
@@ -10163,27 +13605,128 @@ class PipeworksGUI:
             self.output_text.edit_modified(False)
             self.extract_btn.config(state=tk.NORMAL if ext in ('.txt', '.xfg') else tk.DISABLED)
             self.rebuild_btn.config(state=tk.NORMAL)
-        self.configure_syntax_tags()
-        self.configure_editor_diff_tags()
-        self.setup_root_table_folds()
-        self._sync_editor_diff_baseline(loaded_text)
-        self.loading_text_editor = False
-        if self.text_mode == "pvm":
-            self.start_visible_syntax_highlight_only()
-        else:
-            self.start_lazy_syntax_highlight()
+        self._finish_text_editor_load(loaded_text)
 
     def _current_editor_text(self):
+        if self.monster_data_disassembly_active and self.monster_data_editable_text is not None:
+            return MONSTER_DATA_TOOL.apply_disassembly_edits(
+                self.monster_data_editable_text,
+                self.output_text.get("1.0", tk.END).rstrip("\n") + "\n",
+                self.monster_data_disassembly_baseline or "",
+            )
         return self.output_text.get("1.0", tk.END).rstrip("\n") + "\n"
+
+    def _toggle_monster_data_disassembly(self):
+        if not (
+            self.bundle_entry_edit
+            and self.bundle_entry_edit.get("character_data_label") == "000MONSTER_DATA"
+            and self.text_mode == "char_data"
+            and MONSTER_DATA_TOOL is not None
+        ):
+            return False
+        if self.monster_data_disassembly_active:
+            self.monster_data_disassembly_generation += 1
+            try:
+                displayed = MONSTER_DATA_TOOL.apply_disassembly_edits(
+                    self.monster_data_editable_text or "",
+                    self.output_text.get("1.0", tk.END).rstrip("\n") + "\n",
+                    self.monster_data_disassembly_baseline or "",
+                )
+            except Exception as exc:
+                messagebox.showerror("MonsterData Block View", f"Could not apply block-view edits:\n{exc}")
+                return True
+            self.monster_data_editable_text = displayed
+            self.monster_data_disassembly_active = False
+            self.output_text.config(state=tk.NORMAL)
+            self.output_text.delete("1.0", tk.END)
+            self.output_text.insert("1.0", displayed)
+            self.extract_btn.config(text="Block View")
+            self.rebuild_btn.config(state=tk.NORMAL)
+            self.output_text.edit_reset()
+            self.output_text.edit_modified(False)
+            self._sync_editor_diff_baseline(self.monster_data_editable_baseline or displayed)
+            self.monster_data_editable_baseline = None
+            self.monster_data_disassembly_baseline = None
+            self.setup_root_table_folds()
+            self.syntax_highlighted_intervals = []
+            self.start_lazy_syntax_highlight()
+            return True
+
+        editable = self.output_text.get("1.0", tk.END).rstrip("\n") + "\n"
+        self.monster_data_editable_text = editable
+        self.monster_data_editable_baseline = self.editor_original_text
+        temp_path = self.bundle_entry_edit.get("temp_path")
+        self.monster_data_disassembly_generation += 1
+        generation = self.monster_data_disassembly_generation
+        self.extract_btn.config(text="Loading...", state=tk.DISABLED)
+        self.rebuild_btn.config(state=tk.DISABLED)
+        self.output_text.config(state=tk.DISABLED)
+
+        def worker():
+            try:
+                source_blob = None
+                if temp_path and Path(temp_path).exists():
+                    source_blob = Path(temp_path).read_bytes()
+                displayed = MONSTER_DATA_TOOL.disassemble_source_view(editable, source_blob)
+                error = None
+            except Exception as exc:
+                displayed = None
+                error = exc
+
+            def finish():
+                if generation != self.monster_data_disassembly_generation:
+                    return
+                if error is not None:
+                    self.output_text.config(state=tk.NORMAL)
+                    self.extract_btn.config(text="Block View", state=tk.NORMAL)
+                    self.rebuild_btn.config(state=tk.NORMAL)
+                    self.monster_data_editable_baseline = None
+                    messagebox.showerror("MonsterData Block View", f"Failed to build MonsterData block view:\n{error}")
+                    return
+                self.monster_data_disassembly_active = True
+                self.monster_data_disassembly_baseline = displayed
+                display_lines = displayed.splitlines(keepends=True)
+                next_line = 0
+                self.output_text.config(state=tk.NORMAL)
+                self.output_text.delete("1.0", tk.END)
+
+                def insert_next_chunk():
+                    nonlocal next_line
+                    if generation != self.monster_data_disassembly_generation:
+                        return
+                    end_line = min(next_line + 750, len(display_lines))
+                    self.output_text.config(state=tk.NORMAL)
+                    self.output_text.insert(tk.END, "".join(display_lines[next_line:end_line]))
+                    next_line = end_line
+                    if next_line < len(display_lines):
+                        self.output_text.config(state=tk.DISABLED)
+                        self.root.after_idle(insert_next_chunk)
+                        return
+                    self.extract_btn.config(text="Data View", state=tk.NORMAL)
+                    self.rebuild_btn.config(state=tk.NORMAL)
+                    self.output_text.edit_reset()
+                    self.output_text.edit_modified(False)
+                    self._sync_editor_diff_baseline(displayed)
+                    self.setup_root_table_folds()
+                    self.syntax_highlighted_intervals = []
+                    self.start_lazy_syntax_highlight()
+
+                insert_next_chunk()
+
+            self.root.after(0, finish)
+
+        threading.Thread(target=worker, daemon=True).start()
+        return True
 
     def _editor_has_unsaved_text_changes(self):
         if not self.text_mode or self.loading_text_editor:
             return False
-        current = self._current_editor_text()
-        baseline = self.editor_original_text or ""
-        if not baseline.endswith("\n"):
-            baseline += "\n"
-        return current != baseline
+        current = self._normalize_editor_text(self._current_editor_text())
+        if self.monster_data_disassembly_active and self.monster_data_editable_baseline is not None:
+            baseline = self.monster_data_editable_baseline
+        else:
+            baseline = self.editor_original_text or ""
+        return current != self._normalize_editor_text(baseline)
 
     def compile_editor_text_to_bsf(self, output_path):
         if not HAS_GSTE_SCRIPT_TOOL:
@@ -10219,6 +13762,19 @@ class PipeworksGUI:
             return True
         except Exception as exc:
             messagebox.showerror("Compile Error", f"Failed to patch PVM:\n{exc}")
+            return False
+
+    def compile_editor_text_to_loc(self, output_path, base_loc_path=None):
+        if not HAS_LOC_TEXT_TOOL:
+            messagebox.showerror("Missing Tool", "loc_text_tool.py is required to rebuild LOC files.")
+            return False
+        try:
+            base_path = Path(base_loc_path or output_path)
+            original = base_path.read_bytes()
+            Path(output_path).write_bytes(editable_to_loc(self._current_editor_text(), original))
+            return True
+        except Exception as exc:
+            messagebox.showerror("Compile Error", f"Failed to rebuild LOC:\n{exc}")
             return False
 
     def compile_editor_text_to_character_data(self, output_path):
@@ -10321,12 +13877,77 @@ class PipeworksGUI:
             except Exception:
                 strings = None
             source_blob = Path(self.bundle_entry_edit["temp_path"]).read_bytes()
-            patched_blob = skeleton_tool.apply_txt_to_skeleton_blob(text_path, source_blob, strings)
+            patched_blob = skeleton_tool.apply_txt_to_skeleton_blob(
+                text_path,
+                source_blob,
+                strings,
+                self.bundle_entry_edit.get("skeleton_endian"),
+            )
             Path(output_path).parent.mkdir(parents=True, exist_ok=True)
             Path(output_path).write_bytes(patched_blob)
             return True
         except Exception as exc:
             messagebox.showerror("Compile Error", f"Failed to patch {skeleton_label}:\n{exc}")
+            return False
+
+    def compile_editor_text_to_material(self, output_path):
+        if not self.bundle_entry_edit or not HAS_MATERIAL_TEXT_TOOL:
+            messagebox.showerror("Save Error", "Material data must be edited from inside a loaded bundle.")
+            return False
+        try:
+            original = self.bundle_entry_edit.get("material_original")
+            if original is None:
+                original = Path(output_path).read_bytes()
+            endian = self.bundle_entry_edit.get("material_endian", '<')
+            text = self._current_editor_text()
+            compiled = MATERIAL_TEXT_TOOL.encode_material(text, original, endian)
+            Path(output_path).write_bytes(compiled)
+            text_path = Path(self.bundle_entry_edit.get("text_path") or self.text_source_path)
+            text_path.write_text(text, encoding="utf-8", newline="\n")
+            self.bundle_entry_edit["material_original"] = compiled
+            return True
+        except Exception as exc:
+            messagebox.showerror("Material Save Error", f"Failed to compile material:\n{exc}")
+            return False
+
+    def compile_editor_text_to_palette(self, output_path):
+        if not self.bundle_entry_edit or not HAS_PALETTE_TEXT_TOOL:
+            messagebox.showerror("Save Error", "Palette data must be edited from inside a loaded bundle.")
+            return False
+        try:
+            original = self.bundle_entry_edit.get("palette_original")
+            if original is None:
+                original = Path(output_path).read_bytes()
+            text = self._current_editor_text()
+            compiled = PALETTE_TEXT_TOOL.encode_palette(text, original)
+            Path(output_path).write_bytes(compiled)
+            Path(self.bundle_entry_edit.get("text_path") or self.text_source_path).write_text(
+                text, encoding="utf-8", newline="\n"
+            )
+            self.bundle_entry_edit["palette_original"] = compiled
+            return True
+        except Exception as exc:
+            messagebox.showerror("Palette Save Error", f"Failed to compile palette:\n{exc}")
+            return False
+
+    def compile_editor_text_to_fdf(self, output_path):
+        if not self.bundle_entry_edit or not HAS_FDF_TEXT_TOOL:
+            messagebox.showerror("Save Error", "FDF data must be edited from inside a loaded bundle.")
+            return False
+        try:
+            original = self.bundle_entry_edit.get("fdf_original")
+            if original is None:
+                original = Path(output_path).read_bytes()
+            text = self._current_editor_text()
+            compiled = FDF_TEXT_TOOL.encode_fdf(text, original)
+            Path(output_path).write_bytes(compiled)
+            Path(self.bundle_entry_edit.get("text_path") or self.text_source_path).write_text(
+                text, encoding="utf-8", newline="\n"
+            )
+            self.bundle_entry_edit["fdf_original"] = compiled
+            return True
+        except Exception as exc:
+            messagebox.showerror("FDF Save Error", f"Failed to compile FDF font:\n{exc}")
             return False
 
     def create_incremental_backup(self, filepath):
@@ -10351,15 +13972,25 @@ class PipeworksGUI:
         source = Path(self.text_source_path)
         if self.text_mode == 'bsf':
             return self.compile_editor_text_to_bsf(source)
-        if self.text_mode in ('txt', 'xfg', 'ifc'):
+        if self.text_mode in ('txt', 'xfg', 'ifl'):
             source.write_text(self._current_editor_text(), encoding='utf-8', newline='\n')
             return True
+        if self.text_mode == 'ifc':
+            try:
+                compact = self._compact_ifc_text(self._current_editor_text())
+                source.write_text(compact, encoding='utf-8', newline='\n')
+                return True
+            except Exception as exc:
+                messagebox.showerror("IFC Save Error", f"The IFC markup is not valid:\n{exc}")
+                return False
         if self.text_mode == 'edf':
             return self.compile_editor_text_to_edf(source)
         if self.text_mode == 'prx':
             return self.compile_editor_text_to_prx(source, self.text_source_path)
         if self.text_mode == 'pvm':
             return self.compile_editor_text_to_pvm(source, self.text_source_path)
+        if self.text_mode == 'loc':
+            return self.compile_editor_text_to_loc(source, self.text_source_path)
         if self.text_mode in {'char_data', 'level_data'}:
             if not self.bundle_entry_edit:
                 messagebox.showerror("Save Error", "Data entries must be edited from inside a loaded bundle.")
@@ -10370,6 +14001,43 @@ class PipeworksGUI:
                 messagebox.showerror("Save Error", "Skeleton data must be edited from inside a loaded bundle.")
                 return False
             return self.compile_editor_text_to_skeleton_type3(self.bundle_entry_edit["temp_path"])
+        if self.text_mode == 'material':
+            if not self.bundle_entry_edit:
+                messagebox.showerror("Save Error", "Material data must be edited from inside a loaded bundle.")
+                return False
+            return self.compile_editor_text_to_material(self.bundle_entry_edit["temp_path"])
+        if self.text_mode == 'palette':
+            if not self.bundle_entry_edit:
+                messagebox.showerror("Save Error", "Palette data must be edited from inside a loaded bundle.")
+                return False
+            return self.compile_editor_text_to_palette(self.bundle_entry_edit["temp_path"])
+        if self.text_mode == 'fdf':
+            if not self.bundle_entry_edit:
+                messagebox.showerror("Save Error", "FDF data must be edited from inside a loaded bundle.")
+                return False
+            return self.compile_editor_text_to_fdf(self.bundle_entry_edit["temp_path"])
+        if self.text_mode == 'camera_path':
+            if not self.bundle_entry_edit:
+                messagebox.showerror("Save Error", "Camera/path data must be edited from inside a loaded bundle.")
+                return False
+            try:
+                original = self.bundle_entry_edit.get("camera_path_original")
+                if original is None:
+                    original = Path(self.bundle_entry_edit["temp_path"]).read_bytes()
+                compiled = self._camera_path_from_text(self._current_editor_text(), original)
+                Path(self.bundle_entry_edit["temp_path"]).write_bytes(compiled)
+                self.bundle_entry_edit["camera_path_original"] = compiled
+                rendered = self._camera_path_to_text(
+                    compiled,
+                    self.bundle_entry_edit.get("entry", {}).get("name", "CameraPath"),
+                )
+                Path(self.text_source_path).write_text(rendered, encoding="utf-8", newline="\n")
+                self.output_text.delete("1.0", tk.END)
+                self.output_text.insert("1.0", rendered)
+                return True
+            except Exception as exc:
+                messagebox.showerror("Camera/Path", f"Failed to compile camera/path data:\n{exc}")
+                return False
         return False
 
     def save_text_direct(self, data_writer, label):
@@ -10382,9 +14050,17 @@ class PipeworksGUI:
             result = data_writer(source)
             if result is False:
                 return False
+            if self.monster_data_disassembly_active:
+                merged = self._current_editor_text()
+                self.monster_data_editable_text = merged
+                self.monster_data_editable_baseline = merged
+                self.monster_data_disassembly_baseline = self.output_text.get("1.0", tk.END).rstrip("\n") + "\n"
             self.output_text.edit_reset()
             self.output_text.edit_modified(False)
-            self._sync_editor_diff_baseline()
+            if self.monster_data_disassembly_active:
+                self._sync_editor_diff_baseline(self.monster_data_disassembly_baseline)
+            else:
+                self._sync_editor_diff_baseline()
             backup_msg = f"\nBackup: {backup}" if backup else ""
             if not self.bundle_entry_edit:
                 messagebox.showinfo("Saved", f"{label} saved successfully:\n{source}{backup_msg}")
@@ -10425,7 +14101,70 @@ class PipeworksGUI:
         window.wait_window()
         return choice["value"]
 
+    def open_fdf_atlas_preview(self):
+        match = re.search(r"^\s*AtlasFile\s*=\s*(['\"])(.*?)\1\s*;", self._current_editor_text(), re.MULTILINE)
+        if not match:
+            messagebox.showerror("FDF Atlas", "The FDF source has no valid AtlasFile value.")
+            return
+        atlas_name = Path(match.group(2).replace('\\', '/')).name.lower()
+        atlas_stem = atlas_name.rsplit('.', 1)[0]
+        candidates = []
+        for entry in self._texture_preview_entries():
+            display = Path(self._texture_preview_display_name(entry)).name.lower()
+            display_stem = display.rsplit('.', 1)[0]
+            if display_stem == atlas_stem:
+                candidates.append(entry)
+        if not candidates:
+            messagebox.showerror("FDF Atlas", f"No type-9 texture resource matches {match.group(2)}.")
+            return
+        if self._editor_has_unsaved_text_changes():
+            choice = messagebox.askyesnocancel("Unsaved FDF", "Save the FDF changes before opening its atlas?")
+            if choice is None:
+                return
+            if choice and not self.save_bundle_entry_edit():
+                return
+        entry = candidates[0]
+        sample_image = None
+        try:
+            session = self._ensure_texture_preview_session(entry)
+            png_path = self._texture_preview_png_path(session, entry)
+            resource_path = Path(session["replacement_dir"]) / str(entry.get('name', '')).replace('\\', '/')
+            if not resource_path.exists() or not png_path.exists():
+                self.parser.extract_file(entry, session["replacement_dir"])
+            if png_path.exists() and hasattr(FDF_TEXT_TOOL, "render_sample"):
+                sample_image = FDF_TEXT_TOOL.render_sample(self._current_editor_text(), png_path)
+        except Exception:
+            sample_image = None
+        self.open_texture_preview(entry)
+        if sample_image is not None and HAS_PIL and ImageTk is not None:
+            self.output_text.insert(tk.END, "\nFont sample:\n")
+            self.fdf_font_preview_image = ImageTk.PhotoImage(sample_image)
+            self.output_text.image_create(tk.END, image=self.fdf_font_preview_image)
+            self.output_text.insert(tk.END, "\n")
+
     def convert_text_editor_file(self):
+        if self._toggle_monster_data_disassembly():
+            return
+
+        if self.text_mode == 'fdf':
+            self.open_fdf_atlas_preview()
+            return
+
+        if self.text_mode == 'palette':
+            output_path = _dialog(
+                self.root,
+                filedialog.asksaveasfilename,
+                title="Export Palette TXT As",
+                initialdir=os.path.dirname(self.text_source_path),
+                initialfile=Path(self.text_source_path).stem + ".txt",
+                defaultextension=".txt",
+                filetypes=[("Text Files", "*.txt"), ("All Files", "*.*")],
+            )
+            if output_path:
+                Path(output_path).write_text(self._current_editor_text(), encoding="utf-8", newline="\n")
+                messagebox.showinfo("Exported", f"Palette TXT exported successfully:\n{output_path}")
+            return
+
         if self.text_mode == 'bsf':
             initial = os.path.splitext(os.path.basename(self.text_source_path))[0] + ".txt"
             output_path = _dialog(
@@ -10515,6 +14254,21 @@ class PipeworksGUI:
                 Path(output_path).write_text(self._current_editor_text(), encoding='utf-8', newline='\n')
                 messagebox.showinfo("Converted", f"PVM report saved successfully:\n{output_path}")
 
+        if self.text_mode == 'loc':
+            initial = os.path.splitext(os.path.basename(self.text_source_path))[0] + ".loc.txt"
+            output_path = _dialog(
+                self.root,
+                filedialog.asksaveasfilename,
+                title="Save LOC Text As",
+                initialdir=os.path.dirname(self.text_source_path),
+                initialfile=initial,
+                defaultextension=".txt",
+                filetypes=[("Text Files", "*.txt"), ("All Files", "*.*")],
+            )
+            if output_path:
+                Path(output_path).write_text(self._current_editor_text(), encoding='utf-8', newline='\n')
+                messagebox.showinfo("Converted", f"LOC text saved successfully:\n{output_path}")
+
         if self.text_mode in {'char_data', 'level_data'}:
             data_label = self.bundle_entry_edit.get("character_data_label", "Character_Data") if self.bundle_entry_edit else "Character_Data"
             output_path = _dialog(
@@ -10548,10 +14302,14 @@ class PipeworksGUI:
 
     def save_text_editor_file(self):
         if self.bundle_entry_edit:
-            if self.write_current_editor_to_source():
-                self.output_text.edit_reset()
-                if self.save_bundle_entry_edit():
-                    self._sync_editor_diff_baseline()
+            if not self._stage_current_bundle_editor_changes():
+                return
+            changed_names = self._changed_bundle_entry_names()
+            if not changed_names:
+                return
+            save_choice, selected_names = self._prompt_save_bundle_entry_changes(changed_names)
+            if save_choice and self.save_bundle_entry_edit(selected_names=selected_names):
+                self._sync_editor_diff_baseline()
             return
 
         if self.text_mode == 'bsf':
@@ -10570,6 +14328,10 @@ class PipeworksGUI:
             self.save_text_direct(lambda path: path.write_text(self._current_editor_text(), encoding='utf-8', newline='\n'), "IFC")
             return
 
+        if self.text_mode == 'ifl':
+            self.save_text_direct(lambda path: path.write_text(self._current_editor_text(), encoding='utf-8', newline='\n'), "IFL")
+            return
+
         if self.text_mode == 'edf':
             self.save_text_direct(lambda path: self.compile_editor_text_to_edf(path), "EDF")
             return
@@ -10580,6 +14342,10 @@ class PipeworksGUI:
 
         if self.text_mode == 'pvm':
             self.save_text_direct(lambda path: self.compile_editor_text_to_pvm(path, self.text_source_path), "PVM")
+            return
+
+        if self.text_mode == 'loc':
+            self.save_text_direct(lambda path: self.compile_editor_text_to_loc(path, self.text_source_path), "LOC")
             return
 
         if self.text_mode in {'char_data', 'level_data'}:

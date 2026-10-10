@@ -623,7 +623,7 @@ def scan_string_triple_runs(data: bytes | bytearray, strings: list[str], base: i
             ids = [u32(data, base + rel + count * 0x0C + field) for field in (0, 4, 8)]
             if not all(0 <= value < len(strings) and strings[value] for value in ids):
                 break
-            # The middle string is usually the runtime class, and first/third are the instance name.
+        # Prefer the runtime-class string, then instance names.
             if strings[ids[0]] != strings[ids[2]]:
                 break
             if not is_meaningful_string(strings[ids[0]]) or not is_meaningful_string(strings[ids[1]]):
@@ -787,7 +787,7 @@ def target_record_name(data: bytes | bytearray, strings: list[str], base: int, s
             candidates.append((field_rel, strings[raw]))
     if not candidates:
         return None
-    # Prefer the first field for action/state records, animation name at +0x0C for ChAnimResource.
+            # Prefer field 0, or +0x0C for ChAnimResource names.
     type_id = u32(data, base + target + 0x08) if target + 0x08 <= size - 4 else 0
     if 0 <= type_id < len(strings) and strings[type_id].startswith("ChAnim"):
         name_id = u32(data, base + target + 0x0C) if target + 0x0C <= size - 4 else len(strings)
@@ -917,15 +917,8 @@ def generic_owned_range_labels(
     ordered = sorted((rel, stem) for rel, stem in starts.items() if 0 <= rel < size)
     if not ordered:
         return labels, forced_types
-    effect_start = u32(data, base + 0x0B50) if 0x0B54 <= size else 0
-    effect_count = u32(data, base + 0x0B54) if 0x0B58 <= size else 0
-    effect_end = effect_start + effect_count * 0x68 if effect_start and 0 < effect_count < 0x10000 else 0
     for index, (start, stem) in enumerate(ordered):
         end = ordered[index + 1][0] if index + 1 < len(ordered) else size
-        if clean_label(stem).lower().startswith("effecttable"):
-            if not (effect_start <= start < effect_end <= size):
-                continue
-            end = min(end, effect_end)
         if end <= start or end - start > 0x8000:
             continue
         for rel in range(start, end, 4):
@@ -1338,7 +1331,6 @@ PS2_STARTUP_TABLE_FIELD_NAMES = {
     0x0B1C: "Camera.MaxBlend",
     0x0B3C: "IntroCamera.Invalid",
     0x0B40: "IntroCamera.Voice",
-    0x0B54: "StartupAction.JumpUp",
     0x0B68: "StartupAction.Roar",
     0x0B74: "StartupAction.Punch",
     0x0B7C: "StartupAction.AirSpinUpB",
@@ -1459,7 +1451,7 @@ PS2_ATTACK_PROPERTY_EVENT_FIELD_NAMES = {
 
 PS2_ATTACK_PROPERTY_EVENT_FIELD_TYPES = {
     0x04: "f32",
-    0x08: "u16x2",
+    0x08: "int",
     0x10: "int",
     0x14: "int",
     0x18: "int",
@@ -1485,8 +1477,7 @@ def ps2_move_event_field_name(event_type: int, field_rel: int, kind: str, string
         return "Type"
     if event_type == 0:
         return PS2_ATTACK_PROPERTY_EVENT_FIELD_NAMES.get(field_rel, f"Payload0x{field_rel:02X}")
-    # Every named DEvent case branches from DMonsterBase::onMoveEvent. These names are
-    # intentionally class/usage based; bit-level payload meanings stay packed until proven.
+    # Name DEvent cases by their onMoveEvent class and usage.
     if event_type in {2, 11, 14, 15}:
         class_fields = {
             2: {0x04: "EventTime", 0x08: "FootstepCue", 0x0C: "FootstepParam"},
@@ -1739,7 +1730,7 @@ PS2_RANGED_ACTION_EMITTER_FIELDS = [
     (0x24, "f32", "SpawnOffsetX"),
     (0x28, "f32", "SpawnOffsetY"),
     (0x2C, "f32", "SpawnOffsetZ"),
-    (0x30, "u16x2", "FrameIndexPair"),
+    (0x30, "int", "Packed0x30"),
 ]
 
 PS2_INDEXED_ACTION_BASE_KIND_NAMES = {
@@ -1934,10 +1925,8 @@ def ps2_string_ref_labels(
 ) -> tuple[dict[int, str], dict[int, str]]:
     labels: dict[int, str] = {}
     forced_types: dict[int, str] = {}
-    effect_start = u32(data, base + 0x0B50) if 0x0B54 <= size else 0
-    effect_count = u32(data, base + 0x0B54) if 0x0B58 <= size else 0
-    effect_end = effect_start + effect_count * 0x68 if effect_start and 0 < effect_count < 0x10000 else 0
     action_lookup_start = u32(data, base + 0x0B84) if 0x0B88 <= size else 0
+    action_tree_start = u32(data, base + 0x0B50) if 0x0B54 <= size else 0
     for rel in range(0, size - 3, 4):
         if rel in occupied:
             continue
@@ -1963,11 +1952,10 @@ def ps2_string_ref_labels(
                 continue
             in_action_lookup_strings = (
                 action_lookup_start % 4 == 0
-                and effect_start % 4 == 0
-                and action_lookup_start <= rel < effect_start
+                and action_tree_start % 4 == 0
+                and action_lookup_start <= rel < action_tree_start
             )
-            in_effect_records = effect_start <= rel < effect_end <= size
-            if not (in_action_lookup_strings or in_effect_records):
+            if not in_action_lookup_strings:
                 continue
             section = "StringRefs"
         label_base = f"{section}.{stem}"
@@ -2005,10 +1993,6 @@ def ps2_value_type(data: bytes | bytearray, base: int, rel: int, size: int) -> s
     raw = u32(data, base + rel)
     if raw % 4 == 0 and 0x100 <= raw < size:
         return "ref"
-    if looks_like_u16x2(raw):
-        return "u16x2"
-    if looks_like_u8x4(raw):
-        return "u8x4"
     exponent = (raw >> 23) & 0xFF
     value = f32(data, base + rel)
     if raw != 0 and 0x70 <= exponent <= 0x8E and abs(value) < 1000000.0:
@@ -2337,6 +2321,28 @@ def ps2_owner_for_rel(rel: int, known_stems: dict[int, str], explicit_roots: dic
     return "MonsterData"
 
 
+def ps2_action_tree_serialized_end(data: bytes | bytearray, base: int, size: int) -> int | None:
+    """Return the first byte after the proven serialized DActionTree node/edge stream."""
+    if 0x0B54 > size:
+        return None
+    tree = u32(data, base + 0x0B50)
+    if tree % 4 or not (0 < tree + 0x3C <= size):
+        return None
+    node_count = u32(data, base + tree + 0x34)
+    cursor = u32(data, base + tree + 0x38)
+    if not (0 < node_count < 0x1000 and cursor % 4 == 0 and tree <= cursor < size):
+        return None
+    for _node_index in range(node_count):
+        if cursor + 0x4C > size:
+            return None
+        edge_count = u16(data, base + cursor + 0x0E)
+        node_end = cursor + 0x4C + edge_count * 0x68
+        if edge_count > 0x400 or node_end > size:
+            return None
+        cursor = node_end
+    return cursor
+
+
 def ps2_word_labels(
     data: bytes | bytearray,
     strings: list[str],
@@ -2348,13 +2354,11 @@ def ps2_word_labels(
 ) -> tuple[dict[int, str], dict[int, str]]:
     labels: dict[int, str] = {}
     forced_types: dict[int, str] = {}
-    effect_start = u32(data, base + 0x0B50) if 0x0B54 <= size else 0
-    effect_count = u32(data, base + 0x0B54) if 0x0B58 <= size else 0
-    effect_end = effect_start + effect_count * 0x68 if effect_start and 0 < effect_count < 0x10000 else 0
     trailing_start = u32(data, base + 0x0B8C) if 0x0B90 <= size else 0
     indexed_base = u32(data, base + 0x0B60) if 0x0B64 <= size else 0
     indexed_offsets = u32(data, base + 0x0B64) if 0x0B68 <= size else 0
     indexed_base_end = u32(data, base + 0x0B6C) if 0x0B70 <= size else 0
+    action_tree_end = ps2_action_tree_serialized_end(data, base, size)
     indexed_ranges: list[tuple[int, int]] = []
     if (
         indexed_offsets % 4 == 0
@@ -2383,6 +2387,9 @@ def ps2_word_labels(
     for rel in range(0, size - 3, 4):
         if rel in occupied:
             continue
+        # Stop before the unparsed byte region after the ActionTree.
+        if action_tree_end is not None and rel >= action_tree_end:
+            continue
         if indexed_offsets <= rel < indexed_base:
             continue
         if indexed_base <= rel < indexed_base_end:
@@ -2395,7 +2402,7 @@ def ps2_word_labels(
         kind = ps2_value_type(data, base, rel, size)
         owner = ps2_owner_for_rel(rel, known_stems, explicit_roots)
         if owner == "MonsterData" and rel >= 0xA90:
-            if effect_end and rel >= effect_end and not (trailing_start % 4 == 0 and trailing_start <= rel < size):
+            if not (trailing_start % 4 == 0 and trailing_start <= rel < size):
                 continue
             owner = f"DataBlock0x{(rel // 0x1000) * 0x1000:06X}"
         explicit_startup = PS2_STARTUP_TABLE_FIELD_NAMES.get(rel)
@@ -2431,19 +2438,6 @@ def ps2_word_labels(
                 continue
             float_value = f32(data, base + rel) if kind == "f32" else 0.0
             field = ps2_action_base_numeric_field(kind, raw_value, float_value, set())
-            labels[rel] = f"{owner}.{field}"
-            forced_types[rel] = kind
-            continue
-        if owner in {"EffectLookup", "EffectTables"} or owner.startswith("EffectTable"):
-            if not (effect_start <= rel < effect_end <= size):
-                continue
-            raw_value = u32(data, base + rel)
-            if raw_value == 0xFFFFFFFF:
-                continue
-            float_value = f32(data, base + rel) if kind == "f32" else 0.0
-            owner_start = containing_known_stem(known_stems, rel)
-            field_rel = rel - owner_start[0] if owner_start else 0
-            field = ps2_effect_numeric_field(kind, raw_value, float_value, field_rel)
             labels[rel] = f"{owner}.{field}"
             forced_types[rel] = kind
             continue
@@ -2566,6 +2560,101 @@ def ps2_structural_table_labels(
                 labels[rel + field_rel] = f"{stem}.{field_name}"
                 forced_types[rel + field_rel] = forced_kind
 
+    # Parse the 0x3C tree header, 0x4C node headers, and 0x68 edges.
+    action_tree_start = u32(data, base + 0x0B50) if 0x0B54 <= size else 0
+    if action_tree_start % 4 == 0 and 0 < action_tree_start + 0x3C <= size:
+        node_count = u32(data, base + action_tree_start + 0x34)
+        node_cursor = u32(data, base + action_tree_start + 0x38)
+        if 0 < node_count < 0x1000 and node_cursor % 4 == 0 and action_tree_start <= node_cursor < size:
+            labels[action_tree_start + 0x34] = "ActionTree.NodeCount"
+            forced_types[action_tree_start + 0x34] = "int"
+            labels[action_tree_start + 0x38] = "ActionTree.NodeTableRef"
+            forced_types[action_tree_start + 0x38] = "ref"
+            used_node_stems: dict[str, int] = {}
+            for node_index in range(node_count):
+                if node_cursor + 0x4C > size:
+                    break
+                edge_count = u16(data, base + node_cursor + 0x0E)
+                node_end = node_cursor + 0x4C + edge_count * 0x68
+                if edge_count > 0x400 or node_end > size:
+                    break
+                move_ref = u32(data, base + node_cursor + 0x04)
+                if move_ref in primary_action_starts:
+                    node_name = meaningful_stem(ps2_action_record_display_name(data, strings, base, move_ref))
+                else:
+                    node_name = f"Node{node_index:03d}"
+                stem_base = f"DActionTree.Node.{node_name}"
+                duplicate = used_node_stems.get(stem_base, 0)
+                used_node_stems[stem_base] = duplicate + 1
+                stem = stem_base if duplicate == 0 else f"{stem_base}.Variant{duplicate + 1:02d}"
+                roots.setdefault(node_cursor, stem)
+                node_fields = {
+                    0x00: ("int", "NodeIndex"),
+                    0x04: ("ref", "MoveRef"),
+                    0x08: ("f32", "Duration"),
+                    0x0C: ("u16x2", "NodeTypeEdgeCount"),
+                    # Omit the fallback edge's two padding words.
+                    0x10: ("int", "DefaultEdge.Enabled"),
+                    0x14: ("ref", "DefaultEdge.DestinationNodeRef"),
+                    # Map input slots to edge indices; 0xFF is unmapped.
+                    0x20: ("u8x4", "InputEdgeIndex[00-03]"),
+                    0x24: ("u8x4", "InputEdgeIndex[04-07]"),
+                    0x28: ("u8x4", "InputEdgeIndex[08-11]"),
+                    0x2C: ("u8x4", "InputEdgeIndex[12-15]"),
+                    0x30: ("u8x4", "InputEdgeIndex[16-19]"),
+                    0x34: ("u8x4", "InputEdgeIndex[20-23]"),
+                    0x38: ("u8x4", "InputEdgeIndex[24-27]"),
+                    0x3C: ("u8x4", "InputEdgeIndex[28-31]"),
+                    0x40: ("u8x4", "InputEdgeIndex[32-35]"),
+                    0x44: ("u8x4", "InputEdgeIndex[36-39]"),
+                    0x48: ("ref", "EdgeTableRef"),
+                }
+                for field_rel, (force, field_name) in node_fields.items():
+                    labels[node_cursor + field_rel] = f"{stem}.{field_name}"
+                    forced_types[node_cursor + field_rel] = force
+                edge_base = node_cursor + 0x4C
+                for edge_index in range(edge_count):
+                    edge = edge_base + edge_index * 0x68
+                    edge_stem = f"{stem}.Edge{edge_index:02d}"
+                    roots.setdefault(edge, edge_stem)
+                    edge_fields = {
+                        0x00: ("int", "Enabled"),
+                        0x04: ("ref", "DestinationNodeRef"),
+                        0x10: ("int", "EdgeFlags"),
+                        0x14: ("f32", "TakeWindowStartTime"),
+                        0x18: ("f32", "TakeWindowEndTime"),
+                        0x1C: ("f32", "ControlWindowStartTime"),
+                        0x20: ("f32", "ControlWindowEndTime"),
+                        0x24: ("u16x2", "EdgeTypeConstraintCount"),
+                        0x28: ("int", "ControlType"),
+                    }
+                    for field_rel, (force, field_name) in edge_fields.items():
+                        labels[edge + field_rel] = f"{edge_stem}.{field_name}"
+                        forced_types[edge + field_rel] = force
+                    constraint_count = u16(data, base + edge + 0x26)
+                    for constraint_index in range(min(constraint_count, 4)):
+                        constraint = edge + 0x2C + constraint_index * 0x10
+                        constraint_type = u32(data, base + constraint)
+                        labels[constraint] = f"{edge_stem}.Constraint{constraint_index:02d}.TypeId"
+                        forced_types[constraint] = "int"
+                        parameter = constraint + 0x04
+                        labels[parameter] = f"{edge_stem}.Constraint{constraint_index:02d}.Parameter"
+                        if (9 <= constraint_type <= 26 or 61 <= constraint_type <= 91) and constraint_type != 81:
+                            forced_types[parameter] = "bool"
+                        else:
+                            forced_types[parameter] = ps2_value_type(data, base, parameter, size)
+                        # Preserve the final two authoring-only words.
+                        labels[constraint + 0x08] = (
+                            f"{edge_stem}.Constraint{constraint_index:02d}.SerializedMeta0x08"
+                        )
+                        forced_types[constraint + 0x08] = "int"
+                        labels[constraint + 0x0C] = (
+                            f"{edge_stem}.Constraint{constraint_index:02d}.SerializedMeta0x0C"
+                        )
+                        forced_types[constraint + 0x0C] = "int"
+                node_cursor = node_end
+            roots.setdefault(node_cursor, "DActionTree.SerializedEnd")
+
     move_event_base = u32(data, base + 0x0B60) if 0x0B64 <= size else 0
     move_event_offsets = u32(data, base + 0x0B64) if 0x0B68 <= size else 0
     move_event_count = u32(data, base + 0x0B5C) if 0x0B60 <= size else 0
@@ -2611,11 +2700,11 @@ def ps2_structural_table_labels(
             for rel in range(start + 4, end, 4):
                 field_rel = rel - start
                 raw = u32(data, base + rel)
-                if raw == 0 or raw == 0xFFFFFFFF:
-                    continue
                 if event_type == 0 and field_rel in PS2_ATTACK_PROPERTY_EVENT_FIELD_TYPES:
                     labels[rel] = f"{stem}.{ps2_move_event_field_name(event_type, field_rel, PS2_ATTACK_PROPERTY_EVENT_FIELD_TYPES[field_rel])}"
                     forced_types[rel] = PS2_ATTACK_PROPERTY_EVENT_FIELD_TYPES[field_rel]
+                    continue
+                if raw == 0 or raw == 0xFFFFFFFF:
                     continue
                 string_index = string_id_at(data, strings, base + rel)
                 if string_index is not None:
@@ -2644,9 +2733,6 @@ def ps2_structural_table_labels(
 
     ranged_start = u32(data, base + 0x0B80) if 0x0B84 <= size else 0
     action_lookup_start = u32(data, base + 0x0B84) if 0x0B88 <= size else 0
-    effect_start = u32(data, base + 0x0B50) if 0x0B54 <= size else 0
-    effect_count = u32(data, base + 0x0B54) if 0x0B58 <= size else 0
-    effect_end = effect_start + effect_count * 0x68 if effect_start and 0 < effect_count < 0x10000 else 0
     if (
         ranged_start % 4 == 0
         and action_lookup_start % 4 == 0
@@ -2697,43 +2783,6 @@ def ps2_structural_table_labels(
                         forced_types[rel] = force
                     emitter_start += 0x34
                     emitter_index += 1
-
-    if (
-        effect_start % 4 == 0
-        and effect_end % 4 == 0
-        and 0 < effect_start < effect_end <= size
-    ):
-        roots.setdefault(effect_start, "EffectTables")
-        used_effect_stems: dict[str, int] = {}
-        for record_start in range(effect_start, effect_end, 0x68):
-            string_slots_in_record: list[tuple[int, str]] = []
-            for field_rel in range(0, 0x68, 4):
-                if u32(data, base + record_start + field_rel) == 0:
-                    continue
-                string_index = string_id_at(data, strings, base + record_start + field_rel)
-                if string_index is not None and is_meaningful_string(strings[string_index]):
-                    string_slots_in_record.append((field_rel, strings[string_index]))
-            if not string_slots_in_record:
-                continue
-            stem = ps2_effect_record_stem(data, strings, base, record_start, used_effect_stems)
-            roots.setdefault(record_start, stem)
-            for field_rel in range(0, 0x68, 4):
-                rel = record_start + field_rel
-                raw = u32(data, base + rel)
-                if raw == 0 or raw == 0xFFFFFFFF:
-                    continue
-                string_index = string_id_at(data, strings, base + rel)
-                if string_index is not None:
-                    value = strings[string_index]
-                    field_name = ps2_effect_string_field(value, field_rel)
-                    labels[rel] = f"{stem}.{field_name}"
-                    forced_types[rel] = "string"
-                    continue
-                kind = ps2_value_type(data, base, rel, size)
-                value = f32(data, base + rel) if kind == "f32" else 0.0
-                field_name = ps2_effect_numeric_field(kind, raw, value, field_rel)
-                labels[rel] = f"{stem}.{field_name}"
-                forced_types[rel] = kind
 
     body_action_start = u32(data, base + 0x0B58) if 0x0B5C <= size else 0
     body_action_end = u32(data, base + 0x0B78) if 0x0B7C <= size else 0
@@ -2925,13 +2974,13 @@ def ps2_root_lines(
     body_part_start = u32(data, base + 0x0B6C) if 0x0B70 <= size else 0
     beam_start = u32(data, base + 0x0B78) if 0x0B7C <= size else 0
     beam_end = u32(data, base + 0x0B80) if 0x0B84 <= size else 0
-    effect_start = u32(data, base + 0x0B50) if 0x0B54 <= size else 0
+    action_tree_start = u32(data, base + 0x0B50) if 0x0B54 <= size else 0
 
     def root_table_group(rel: int, stem: str) -> tuple[int, str]:
         key = clean_label(stem).lower()
         if body_part_start and beam_start and body_part_start <= rel < beam_start:
             return (9, "RootTables.BodyParts")
-        if beam_end and effect_start and beam_end <= rel < effect_start:
+        if beam_end and action_tree_start and beam_end <= rel < action_tree_start:
             return (6, "RootTables.ActionLookups")
         if key.startswith(("monsterdata", "startuprefs", "coretuning", "startuptables", "cuenames", "resourcerefs", "introcamera")):
             return (0, "RootTables.Header")
@@ -2941,10 +2990,12 @@ def ps2_root_lines(
             return (2, "RootTables.PrimaryLookup")
         if key.startswith("actionrecord"):
             return (3, "RootTables.DMonsterMoves")
+        if key.startswith(("actiontree", "dactiontree")):
+            return (4, "RootTables.ActionTree")
         if key.startswith(("moveeventoffsets", "moveeventoffset")):
-            return (4, "RootTables.MoveEventOffsets")
+            return (5, "RootTables.MoveEventOffsets")
         if key.startswith("moveevent"):
-            return (5, "RootTables.MoveEvents")
+            return (6, "RootTables.MoveEvents")
         if key.startswith(("actionlookup", "trailingactions", "rangedactions")):
             return (6, "RootTables.ActionLookups")
         if key.startswith("effectlookup"):
@@ -2989,7 +3040,23 @@ def ps2_root_lines(
                 for rel, stem in group_entries
                 if display_name(stem) not in generic_toc_stems
             ]
-            group_entries = specific_entries
+            collapsed_entries = []
+            seen_event_groups: set[str] = set()
+            for rel, stem in specific_entries:
+                event_match = re.match(r"^(MoveEvent\..+?)\.Event\d+(?:[_\s].*)?$", stem)
+                group_stem = event_match.group(1) if event_match else stem
+                group_key = clean_label(group_stem).lower()
+                if group_key in seen_event_groups:
+                    continue
+                seen_event_groups.add(group_key)
+                collapsed_entries.append((rel, group_stem))
+            group_entries = collapsed_entries
+        elif group_name == "RootTables.ActionTree":
+            group_entries = [
+                (rel, stem)
+                for rel, stem in group_entries
+                if not re.search(r"\.Edge\d+(?:\.|$)", stem)
+            ]
         if not group_entries:
             continue
         if lines:
@@ -3034,6 +3101,8 @@ def ps2_spacing_section(label: str) -> str:
     if len(parts) >= 2 and parts[0] in {"BeamFightActions", "RangedAction"}:
         return ".".join(parts[:2])
     if len(parts) >= 3 and parts[0] == "DMonsterMove" and parts[2].startswith("Variant"):
+        return ".".join(parts[:3])
+    if len(parts) >= 3 and parts[0:2] == ["DActionTree", "Node"]:
         return ".".join(parts[:3])
     if len(parts) >= 2 and parts[0] in {"DMonsterMove", "MoveEvent", "EffectTable", "BodyPart", "PrimaryData"}:
         return ".".join(parts[:2])
@@ -3239,6 +3308,7 @@ def export_txt(bundle_path: Path, out_path: Path) -> None:
     record_starts = {int(record["rel"]): record for record in chanims}
     previous_section = ""
     previous_action_subsection = ""
+    emitted_action_tree_headers: set[str] = set()
     export_rels = set(labels) | set(fixed_ascii_by_rel)
     for rel in sorted(export_rels, key=ps2_row_sort_key):
         if rel < 0 or rel >= size:
@@ -3267,6 +3337,9 @@ def export_txt(bundle_path: Path, out_path: Path) -> None:
         previous_section = section
         if section.startswith("DMonsterMove.") and lines[-1] == "":
             lines.append(f"## {display_name(section)} 000MONSTER_DATA+0x{rel:06X}")
+        elif section.startswith("DActionTree.Node.") and section not in emitted_action_tree_headers and lines[-1] == "":
+            lines.append(f"## {display_name(section)} 000MONSTER_DATA+0x{rel:06X}")
+            emitted_action_tree_headers.add(section)
         action_subsection = ps2_action_record_subsection(label)
         if action_subsection and action_subsection != previous_action_subsection:
             if lines[-1] != "":
@@ -3300,185 +3373,6 @@ def export_txt(bundle_path: Path, out_path: Path) -> None:
     print(f"Annotated {len(collision_runs)} collision record runs.")
     print(f"Annotated {len(triple_runs)} string triplet runs.")
     print(f"Annotated {len(pointer_runs)} reference runs.")
-    return
-
-    chanims = scan_chanims(data, strings, base, size)
-    chanim_labels = chanim_field_labels(chanims)
-    mask_groups = scan_mask_groups(data, strings, base, size)
-    mask_labels, mask_forced_types, mask_covered_offsets = mask_group_labels(mask_groups)
-    annotate_mask_group_directory(data, base, size, mask_groups, mask_labels, mask_forced_types)
-    header_labels: dict[int, str] = {}
-    header_forced_types: dict[int, str] = {}
-    header_target_stems: dict[int, str] = {}
-    script_labels: dict[int, str] = {}
-    script_forced_types: dict[int, str] = {}
-    script_stems: dict[int, str] = {}
-    collision_runs = scan_collision_record_runs(data, base, size)
-    collision_labels, collision_forced_types = collision_record_labels(data, base, collision_runs)
-    triple_runs = scan_string_triple_runs(data, strings, base, size)
-    triple_labels, triple_forced_types, triple_stems = string_triple_labels(data, strings, base, triple_runs)
-    string_runs = scan_string_index_runs(data, strings, base, size)
-    string_labels, string_forced_types, string_stems = string_index_run_labels(
-        data,
-        strings,
-        base,
-        string_runs,
-        occupied=(
-            set(chanim_labels)
-            | set(mask_labels)
-            | set(header_labels)
-            | set(script_labels)
-            | set(collision_labels)
-            | set(triple_labels)
-        ),
-    )
-
-    known_stems: dict[int, str] = {}
-    for record in chanims:
-        known_stems[int(record["rel"])] = clean_label(str(record["anim"]))
-    for group in mask_groups:
-        known_stems[int(group["rel"])] = clean_label(str(group["name"]))
-    for _run_index, run in enumerate(collision_runs):
-        start = int(run["start"])
-        count = int(run["count"])
-        for record_index in range(count):
-            rel = start + record_index * 0x30
-            label = collision_labels.get(rel)
-            if label:
-                known_stems[rel] = label.split(".", 1)[0]
-    known_stems.update(triple_stems)
-    known_stems.update(string_stems)
-    known_stems.update(header_target_stems)
-    known_stems.update(script_stems)
-
-    pointer_runs = scan_pointer_runs(data, base, size)
-    pointer_labels: dict[int, str] = {}
-    pointer_forced_types: dict[int, str] = {}
-    for _pass_index in range(3):
-        pointer_labels, pointer_forced_types, pointed_stems = pointer_run_labels(
-            data, strings, base, size, pointer_runs, known_stems
-        )
-        before = dict(known_stems)
-        for target, stem in pointed_stems.items():
-            merge_known_stem(known_stems, target, stem)
-        if known_stems == before:
-            break
-
-    occupied_offsets = (
-        set(chanim_labels)
-        | set(mask_labels)
-        | set(header_labels)
-        | set(script_labels)
-        | set(collision_labels)
-        | set(triple_labels)
-        | set(string_labels)
-        | set(pointer_labels)
-    )
-    zero_labels, zero_forced_types = zero_run_labels(data, base, size, occupied_offsets)
-    occupied_offsets |= set(zero_labels)
-    generic_labels, generic_forced_types = generic_owned_range_labels(data, strings, base, size, known_stems, occupied_offsets)
-    occupied_offsets |= set(generic_labels)
-    fallback_labels = fallback_region_labels(size, occupied_offsets)
-
-    major_string_roots = {
-        int(run["start"]): string_stems[int(run["start"])]
-        for run in string_runs
-        if int(run["count"]) >= 10 and int(run["start"]) in string_stems
-    }
-    toc_lines = root_toc_lines(
-        data,
-        strings,
-        base,
-        size,
-        pointer_runs,
-        mask_groups,
-        header_target_stems,
-        extra_roots=major_string_roots,
-    )
-
-    lines: list[str] = [
-        "# 000MONSTER_DATA text export",
-        f"# SourceCMP={bundle_path}",
-        f"# MonsterData={character_data['name']}",
-        f"# MonsterDataOffset=0x{base:X}",
-        f"# MonsterDataSize=0x{size:X}",
-        "# Format: @offset <type> <name> = <value>",
-        "# Types: string, float, int, ref, bool, u16x2, u8x4. Existing old-style f:/s:/hex imports are still accepted.",
-        "",
-    ]
-    lines.extend(toc_lines)
-    lines.append("[000MONSTER_DATA]")
-
-    record_starts = {int(record["rel"]): record for record in chanims}
-    previous_chunk = ""
-    for rel in range(0, size - 3, 4):
-        record = record_starts.get(rel)
-        if record is not None:
-            lines.append("")
-            lines.append(f"## ChAnimResource 000MONSTER_DATA+0x{rel:06X} {record['name']} / {record['anim']}")
-        absolute = base + rel
-        label = (
-            chanim_labels.get(rel)
-            or mask_labels.get(rel)
-            or header_labels.get(rel)
-            or script_labels.get(rel)
-            or collision_labels.get(rel)
-            or triple_labels.get(rel)
-            or string_labels.get(rel)
-            or pointer_labels.get(rel)
-            or generic_labels.get(rel)
-            or zero_labels.get(rel)
-            or fallback_labels.get(rel)
-        )
-        if label is None:
-            label = f"UnclassifiedRegion.Fallback0x{rel:06X}"
-        chunk = chunk_key(label)
-        if previous_chunk and chunk != previous_chunk and (not lines or lines[-1] != ""):
-            lines.append("")
-        previous_chunk = chunk
-        field_rel = None
-        record_rel = None
-        for start in record_starts:
-            if start <= rel < start + CHANIM_RECORD_SIZE:
-                field_rel = rel - start
-                record_rel = start
-                break
-        force = (
-            mask_forced_types.get(rel)
-            or header_forced_types.get(rel)
-            or script_forced_types.get(rel)
-            or collision_forced_types.get(rel)
-            or triple_forced_types.get(rel)
-            or string_forced_types.get(rel)
-            or pointer_forced_types.get(rel)
-            or generic_forced_types.get(rel)
-            or zero_forced_types.get(rel)
-        )
-        if record_rel is not None:
-            if field_rel in CHANIM_STRING_FIELDS:
-                force = "string"
-            elif field_rel in CHANIM_F32_FIELDS:
-                force = "f32"
-            elif field_rel in CHANIM_U32_FIELDS:
-                force = "int"
-        if force is None and rel in mask_covered_offsets:
-            raw = u32(data, absolute)
-            if looks_like_u16x2(raw):
-                force = "u16x2"
-            elif looks_like_u8x4(raw):
-                force = "u8x4"
-        row_type, value_text = export_row_type_and_value(data, strings, absolute, force)
-        lines.append(f"@0x{rel:06X} {row_type:<8} {label} = {value_text}")
-
-    out_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
-    print(f"Wrote {out_path}")
-    print(f"Exported {size // 4} aligned 000MONSTER_DATA words.")
-    print(f"Annotated {len(chanims)} ChAnimResource records.")
-    print(f"Annotated {len(mask_groups)} mask groups.")
-    print(f"Annotated {len(collision_runs)} collision record runs.")
-    print(f"Annotated {len(triple_runs)} string triplet runs.")
-    print(f"Annotated {len(string_runs)} string-list runs.")
-    print(f"Annotated {len(pointer_runs)} reference runs.")
 
 
 def metadata_from_txt(txt_path: Path) -> dict[str, str]:
@@ -3488,6 +3382,376 @@ def metadata_from_txt(txt_path: Path) -> dict[str, str]:
         if match:
             meta[match.group(1).strip()] = match.group(2).strip()
     return meta
+
+
+def disassemble_source_view(text: str, source_blob: bytes | bytearray | None = None) -> str:
+    """Render editable PS2 MonsterData rows as a record/opcode disassembly."""
+    metadata: dict[str, str] = {}
+    rows: list[tuple[int, str, str, str]] = []
+    covered_offsets: set[int] = set()
+    for raw_line in text.splitlines():
+        meta = META_RE.match(raw_line)
+        if meta:
+            metadata[meta.group(1).strip()] = meta.group(2).strip()
+            continue
+        match = ROW_RE.match(raw_line.strip())
+        if match:
+            offset = int(match.group(1), 16)
+            kind = match.group(2)
+            rows.append((offset, kind, match.group(3).strip(), match.group(4).strip()))
+            ascii_size = parse_ascii_kind(kind)
+            width = ascii_size if ascii_size is not None else 4
+            covered_offsets.update(range(offset, offset + width, 4))
+
+    if source_blob is not None:
+        blob = bytes(source_blob)
+        for offset in range(0, len(blob) - 3, 4):
+            if offset in covered_offsets:
+                continue
+            raw = int.from_bytes(blob[offset:offset + 4], "little")
+            rows.append((offset, "u32", f"Raw.Word0x{offset:06X}", f"0x{raw:08X}"))
+        tail = len(blob) & 3
+        if tail:
+            offset = len(blob) - tail
+            raw = " ".join(f"{byte:02X}" for byte in blob[offset:])
+            rows.append((offset, f"bytes[{tail}]", f"Raw.Tail0x{offset:06X}", raw))
+    rows.sort(key=lambda row: row[0])
+
+    def record_key(label: str) -> tuple[str, str]:
+        event = re.match(r"^(MoveEvent\..+?\.Event\d+)(?:_([^.]+))?\.(.+)$", label)
+        if event:
+            return "event", event.group(1) + (f"_{event.group(2)}" if event.group(2) else "")
+        constraint = re.match(r"^(DActionTree\.Node\..+?\.Edge\d+\.Constraint\d+)\.(.+)$", label)
+        if constraint:
+            return "constraint", constraint.group(1)
+        edge = re.match(r"^(DActionTree\.Node\..+?\.Edge\d+)\.(.+)$", label)
+        if edge:
+            return "edge", edge.group(1)
+        node = re.match(
+            r"^(DActionTree\.Node\..+?)(?=\.(?:NodeIndex|MoveRef|Duration|NodeTypeEdgeCount|DefaultEdge|InputEdgeIndex|EdgeTableRef))",
+            label,
+        )
+        if node:
+            return "node", node.group(1)
+        move = re.match(r"^(DMonsterMove\.[^.]+(?:\.Variant\d+)?)\.(.+)$", label)
+        if move:
+            return "move", move.group(1)
+        command = re.match(r"^(ActionInput\..+?)(?=\.(?:AnimationBlockRef|MoveLength|CommandType|InputCode|PressState|HoldMode))", label)
+        if command:
+            return "command", command.group(1)
+        return "table", label.split(".", 1)[0]
+
+    def field_name(label: str, key: str) -> str:
+        prefix = key + "."
+        return label[len(prefix):] if label.startswith(prefix) else label
+
+    lines = [
+        "# MonsterData native record disassembly",
+        f'# SourceCMP={metadata.get("SourceCMP", "")}',
+        f'# MonsterDataOffset={metadata.get("MonsterDataOffset", "")}',
+        f'# MonsterDataSize={metadata.get("MonsterDataSize", "")}',
+        "# Numeric event, command, and constraint opcodes are always retained.",
+        "# Unknown fields remain typed records with their original offsets.",
+        "# Field guide:",
+        "#   Animation / AnimationBlockRef selects the animation played by a move or command.",
+        "#   DamageScale and HitStopScale control damage and impact pause scaling.",
+        "#   ActiveFrame, RecoveryFrame, and CancelWindow define move timing.",
+        "#   MoveRef and DestinationNodeRef link action-tree records; broken links are rejected on save.",
+        "#   InputCode, PressState, and HoldMode describe the required controller input.",
+        "",
+    ]
+
+    initial_groups: dict[tuple[str, str], list[tuple[int, str, str, str]]] = {}
+    for row in rows:
+        initial_groups.setdefault(record_key(row[2]), []).append(row)
+
+    owner_ranges: list[tuple[int, int, int, tuple[str, str]]] = []
+    for group, group_rows in initial_groups.items():
+        directive = group[0]
+        start = min(row[0] for row in group_rows)
+        if directive == "move":
+            owner_ranges.append((start, start + 0x84, 20, group))
+        elif directive == "node":
+            owner_ranges.append((start, start + 0x4C, 30, group))
+        elif directive == "edge":
+            owner_ranges.append((start, start + 0x68, 40, group))
+        elif directive == "constraint":
+            owner_ranges.append((start, start + 0x10, 50, group))
+    physical_events = sorted(
+        ((min(row[0] for row in group_rows), group) for group, group_rows in initial_groups.items() if group[0] == "event"),
+        key=lambda item: item[0],
+    )
+    for index, (start, group) in enumerate(physical_events):
+        end = physical_events[index + 1][0] if index + 1 < len(physical_events) else start + 4
+        owner_ranges.append((start, end, 35, group))
+
+    def physical_owner(row: tuple[int, str, str, str]) -> tuple[str, str]:
+        logical = record_key(row[2])
+        if logical[0] != "table":
+            return logical
+        offset = row[0]
+        matches = [entry for entry in owner_ranges if entry[0] <= offset < entry[1]]
+        if not matches:
+            return logical
+        return max(matches, key=lambda entry: entry[2])[3]
+
+    grouped: dict[tuple[str, str], list[tuple[int, str, str, str]]] = {}
+    for row in rows:
+        grouped.setdefault(physical_owner(row), []).append(row)
+
+    def normalized_owner(value: str) -> str:
+        return re.sub(r"[^a-z0-9]+", "", value.lower().replace("variant", ""))
+
+    def emit_record(row: tuple[int, str, str, str], directive: str, key: str, indent: str) -> None:
+        offset, kind, label, value = row
+        field = field_name(label, key)
+        is_raw_word = field.startswith("Raw.Word0x") or re.fullmatch(r"Word0x[0-9A-Fa-f]+", field)
+        if is_raw_word:
+            group_rows = grouped.get((directive, key), [])
+            group_start = min((item[0] for item in group_rows), default=offset)
+            relative = offset - group_start
+            raw_zero = value in {"0", "0x00000000"}
+            # These positions are fixed serialized capacity, not active fields.
+            if directive == "edge" and raw_zero:
+                return
+            if directive == "node" and relative in {0x18, 0x1C} and raw_zero:
+                return
+            if directive == "move" and relative == 0x74 and raw_zero:
+                return
+            if directive == "event" and key.endswith("_AttackProperty"):
+                if relative in {0x44, 0x48, 0x4C} and raw_zero:
+                    return
+                if relative in {0x50, 0x54, 0x58, 0x5C} and value.upper() in {"-1", "0XFFFFFFFF"}:
+                    return
+        if directive == "event" and field == "Type":
+            recovered_name = key.rsplit("_", 1)[-1] if "_" in key else "UnknownEvent"
+            lines.append(f"{indent}@0x{offset:06X} opcode {value} {recovered_name};")
+        elif directive == "constraint" and field == "TypeId":
+            lines.append(f"{indent}@0x{offset:06X} opcode {value} Constraint;")
+        elif directive == "command" and field == "CommandType":
+            lines.append(f"{indent}@0x{offset:06X} opcode {value} Command;")
+        else:
+            role = "operand" if directive in {"event", "constraint", "command"} else "field"
+            lines.append(f"{indent}@0x{offset:06X} {role} {kind} {field} = {value};")
+
+    consumed: set[tuple[str, str]] = set()
+    event_groups = {key: value for key, value in grouped.items() if key[0] == "event"}
+    move_groups = sorted(
+        ((key, value) for key, value in grouped.items() if key[0] == "move"),
+        key=lambda item: item[1][0][0],
+    )
+    if move_groups:
+        lines.extend(("moves [Open][Close]", "{"))
+        for group, move_rows in move_groups:
+            move_name = group[1][len("DMonsterMove."):]
+            lines.append(f"    @0x{move_rows[0][0]:06X} {move_name}")
+        lines.extend(("}", ""))
+    for group, move_rows in move_groups:
+        _, key = group
+        offset = move_rows[0][0]
+        move_name = key[len("DMonsterMove."):]
+        lines.append(f'move @0x{offset:06X} "{move_name}" {{')
+        for row in move_rows:
+            emit_record(row, "move", key, "    ")
+        owner_key = normalized_owner(move_name.split(".Variant", 1)[0])
+        owned_events = []
+        for event_group, event_rows in event_groups.items():
+            event_key = event_group[1]
+            event_owner = event_key[len("MoveEvent."):].split(".Event", 1)[0]
+            if normalized_owner(event_owner) == owner_key:
+                owned_events.append((event_group, event_rows))
+        if owned_events:
+            lines.append("    events {")
+            for event_group, event_rows in sorted(owned_events, key=lambda item: item[1][0][0]):
+                event_key = event_group[1]
+                event_name = event_key.split(".Event", 1)[1]
+                lines.append(f'        event @0x{event_rows[0][0]:06X} "{event_name}" {{')
+                for row in event_rows:
+                    emit_record(row, "event", event_key, "            ")
+                lines.append("        }")
+                consumed.add(event_group)
+            lines.append("    }")
+        lines.extend(("}", ""))
+        consumed.add(group)
+
+    node_groups = sorted(
+        ((key, value) for key, value in grouped.items() if key[0] == "node"),
+        key=lambda item: item[1][0][0],
+    )
+    if node_groups:
+        lines.append("action_tree {")
+    for node_group, node_rows in node_groups:
+        node_key = node_group[1]
+        node_name = node_key[len("DActionTree.Node."):]
+        lines.append(f'    node @0x{node_rows[0][0]:06X} "{node_name}" {{')
+        for row in node_rows:
+            emit_record(row, "node", node_key, "        ")
+        edge_groups = sorted(
+            (
+                (key, value) for key, value in grouped.items()
+                if key[0] == "edge" and key[1].startswith(node_key + ".Edge")
+            ),
+            key=lambda item: item[1][0][0],
+        )
+        for edge_group, edge_rows in edge_groups:
+            edge_key = edge_group[1]
+            destination = "unresolved"
+            for _offset, _kind, edge_label, edge_value in edge_rows:
+                if edge_label.endswith(".DestinationNodeRef"):
+                    destination = edge_value.removeprefix("DActionTree.Node.")
+                    break
+            lines.append(f'        transition @0x{edge_rows[0][0]:06X} -> "{destination}" {{')
+            for row in edge_rows:
+                emit_record(row, "edge", edge_key, "            ")
+            constraint_groups = sorted(
+                (
+                    (key, value) for key, value in grouped.items()
+                    if key[0] == "constraint" and key[1].startswith(edge_key + ".Constraint")
+                ),
+                key=lambda item: item[1][0][0],
+            )
+            for constraint_group, constraint_rows in constraint_groups:
+                constraint_key = constraint_group[1]
+                lines.append(f'            condition @0x{constraint_rows[0][0]:06X} {{')
+                for row in constraint_rows:
+                    emit_record(row, "constraint", constraint_key, "                ")
+                lines.append("            }")
+                consumed.add(constraint_group)
+            lines.append("        }")
+            consumed.add(edge_group)
+        lines.append("    }")
+        consumed.add(node_group)
+    if node_groups:
+        lines.extend(("}", ""))
+
+    command_groups = sorted(
+        ((key, value) for key, value in grouped.items() if key[0] == "command"),
+        key=lambda item: item[1][0][0],
+    )
+    if command_groups:
+        lines.append("command_stream {")
+        for command_group, command_rows in command_groups:
+            command_key = command_group[1]
+            lines.append(f'    command @0x{command_rows[0][0]:06X} "{command_key[len("ActionInput."):]}" {{')
+            for row in command_rows:
+                emit_record(row, "command", command_key, "        ")
+            lines.append("    }")
+            consumed.add(command_group)
+        lines.extend(("}", ""))
+
+    # Events with no recovered move owner remain explicit instead of disappearing.
+    remaining_events = sorted(
+        ((key, value) for key, value in event_groups.items() if key not in consumed),
+        key=lambda item: item[1][0][0],
+    )
+    if remaining_events:
+        lines.append("unowned_events {")
+        for event_group, event_rows in remaining_events:
+            event_key = event_group[1]
+            lines.append(f'    event @0x{event_rows[0][0]:06X} "{event_key[len("MoveEvent."):]}" {{')
+            for row in event_rows:
+                emit_record(row, "event", event_key, "        ")
+            lines.append("    }")
+            consumed.add(event_group)
+        lines.extend(("}", ""))
+
+    remaining_groups = sorted(
+        ((key, value) for key, value in grouped.items() if key not in consumed),
+        key=lambda item: item[1][0][0],
+    )
+    for group, table_rows in remaining_groups:
+        directive, key = group
+        if directive == "table" and key == "Raw":
+            continue
+        lines.append(f'{directive} @0x{table_rows[0][0]:06X} "{key}" {{')
+        for row in table_rows:
+            emit_record(row, directive, key, "    ")
+        lines.extend(("}", ""))
+        consumed.add(group)
+
+    lines.extend(("", f"# Decoded records: {len(rows)}", ""))
+    return "\n".join(lines)
+
+
+DISASSEMBLY_OPCODE_RE = re.compile(
+    r"^\s*@0x([0-9A-Fa-f]+)\s+opcode\s+([^;\s]+)(?:\s+[^;]*)?;\s*$"
+)
+DISASSEMBLY_VALUE_RE = re.compile(
+    r"^\s*@0x([0-9A-Fa-f]+)\s+(?:field|operand)\s+([A-Za-z0-9_]+(?:\[[0-9A-Fa-fxX]+\])?)\s+(.+?)\s*=\s*(.*?);\s*$"
+)
+
+
+def disassembly_values(text: str) -> dict[int, tuple[str, str, str]]:
+    values: dict[int, tuple[str, str, str]] = {}
+
+    def add_value(offset: int, record: tuple[str, str, str]) -> None:
+        existing = values.get(offset)
+        if existing is None:
+            values[offset] = record
+            return
+        # Duplicate aliases are valid while their values match.
+        if existing == record or (existing[0] == record[0] and existing[2] == record[2]):
+            return
+        raise ValueError(
+            f"Conflicting editable records at @0x{offset:06X}: "
+            f"{existing[1]} and {record[1]}."
+        )
+
+    for line in text.splitlines():
+        opcode = DISASSEMBLY_OPCODE_RE.match(line)
+        if opcode:
+            offset = int(opcode.group(1), 16)
+            add_value(offset, ("int", "Opcode", opcode.group(2)))
+            continue
+        value = DISASSEMBLY_VALUE_RE.match(line)
+        if value:
+            offset = int(value.group(1), 16)
+            add_value(
+                offset,
+                (
+                    value.group(2),
+                    value.group(3).strip(),
+                    value.group(4).strip(),
+                ),
+            )
+    return values
+
+
+def apply_disassembly_edits(editable_text: str, disassembly_text: str, baseline_text: str) -> str:
+    """Merge changed disassembly values into the compact editable offset source."""
+    current = disassembly_values(disassembly_text)
+    baseline = disassembly_values(baseline_text)
+    changed = {offset: value for offset, value in current.items() if baseline.get(offset) != value}
+    if not changed:
+        return editable_text.rstrip("\n") + "\n"
+
+    output: list[str] = []
+    applied: set[int] = set()
+    for line in editable_text.splitlines():
+        match = ROW_RE.match(line.strip())
+        if not match:
+            output.append(line)
+            continue
+        offset = int(match.group(1), 16)
+        replacement = changed.get(offset)
+        if replacement is None:
+            output.append(line)
+            continue
+        kind, _field, value = replacement
+        original_kind = match.group(2)
+        original_label = match.group(3).strip()
+        output.append(f"@0x{offset:06X} {original_kind:<8} {original_label} = {value}")
+        applied.add(offset)
+
+    additions = sorted(set(changed) - applied)
+    if additions:
+        output.extend(("", "# Values edited from the MonsterData decompile view"))
+        for offset in additions:
+            kind, field, value = changed[offset]
+            if kind.startswith("bytes["):
+                raise ValueError(f"Editing an unaligned byte tail is not supported yet (@0x{offset:06X}).")
+            output.append(f"@0x{offset:06X} {kind:<8} Decompiled.{field} = {value}")
+    return "\n".join(output).rstrip("\n") + "\n"
 
 
 def parse_string_value(value: str, strings: list[str]) -> int:

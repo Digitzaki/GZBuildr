@@ -302,15 +302,9 @@ def export_txt(cmp_path: Path, out_path: Path, entry_name: str | None = None) ->
     transform_record_size = (size - transform_table) // node_count if node_count and transform_table < size else 0
 
     lines: list[str] = [
-        "# Pipeworks type-3 skeleton text export",
         f"# SourceBundle={cmp_path}",
-        f"# SourceCMP={cmp_path}" if endian == "little" else f"# SourceBDG={cmp_path}",
         f"# SkeletonEntry={entry.get('name')}",
-        f"# SkeletonOffset=0x{base:X}",
-        f"# SkeletonSize=0x{size:X}",
-        f"# Endian={endian}",
         "# Format: @offset <type> <name> = <value>",
-        "# Transform notes: Position*/Quaternion* names are inferred from the 80-byte per-node transform block.",
         "",
         "[Skeleton.Header]",
     ]
@@ -446,16 +440,9 @@ def export_type4_txt(cmp_path: Path, out_path: Path, entry_name: str | None = No
     names = skeleton_node_names(data, entries, strings, entry, endian)
 
     lines: list[str] = [
-        "# Pipeworks type-4 skeleton text export",
         f"# SourceBundle={cmp_path}",
-        f"# SourceCMP={cmp_path}" if endian == "little" else f"# SourceBDG={cmp_path}",
         f"# SkeletonEntry={entry.get('name')}",
-        f"# SkeletonOffset=0x{base:X}",
-        f"# SkeletonSize=0x{size:X}",
-        f"# Endian={endian}",
         "# Format: @offset <type> <name> = <value>",
-        "# Type-4 notes: this is not the type-3 bind-pose skeleton. It stores one 0x60-byte record per node.",
-        "# PositionA/PositionB/RotationBasis names are structural labels; real engine field names are not confirmed.",
         "",
         "[Skeleton4.Header]",
     ]
@@ -569,9 +556,14 @@ def collect_txt_changes(txt_path: Path, data: bytes | bytearray, base: int, size
     return wanted
 
 
-def apply_txt_to_skeleton_blob(txt_path: Path, skeleton_blob: bytes | bytearray, strings: list[str] | None = None) -> bytes:
+def apply_txt_to_skeleton_blob(
+    txt_path: Path,
+    skeleton_blob: bytes | bytearray,
+    strings: list[str] | None = None,
+    endian: str | None = None,
+) -> bytes:
     data = bytearray(skeleton_blob)
-    endian = endian_from_txt(txt_path)
+    endian = endian or endian_from_txt(txt_path)
     wanted = collect_txt_changes(txt_path, data, 0, len(data), strings, endian)
     for rel, (new_bytes, _value, _label) in wanted.items():
         data[rel : rel + 4] = new_bytes

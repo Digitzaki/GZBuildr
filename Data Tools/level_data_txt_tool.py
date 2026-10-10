@@ -614,9 +614,7 @@ def force_for_property(field_name: str, raw: int, size: int, endian: str | None 
 
 
 def record_stem(record: dict[str, object]) -> str:
-    # Editable names should be the actual placed/template object name. The
-    # LevelDB class bucket (FluffInstances, BuildingTemplates, etc.) stays in
-    # RootTables/comments only.
+    # Use placed/template names; class buckets remain metadata.
     return str(record["name"])
 
 

@@ -44,6 +44,8 @@ class Row:
     prx_name: str
     group: str
     table_offset: int
+    slot_index: int
+    pointer_offset: int
     row_offset: int
     type_id: int
     value_raw: int
@@ -64,7 +66,7 @@ class Row:
             return "int"
         if self.type_id == TYPE_STRING:
             return "string"
-        if self.type_id in (TYPE_REF_A, TYPE_REF_B):
+        if is_ref_type(self.type_id):
             return "ref"
         return f"0x{self.type_id:08X}"
 
@@ -90,6 +92,10 @@ def put_u32(data: bytearray, off: int, value: int) -> None:
 
 def signed32(value: int) -> int:
     return value - 0x100000000 if value & 0x80000000 else value
+
+
+def is_ref_type(type_id: int) -> bool:
+    return type_id == TYPE_REF_A or (type_id & 0xFFFF0000) == 0x03170000
 
 
 def resolve_prx_name(name: str) -> str:
@@ -163,7 +169,7 @@ def find_root_tables(prx: bytes | bytearray, strings: list[str]) -> dict[str, in
 
     scan_end = max(first_table, min(len(prx), 0x600))
     for row_off in range(0, scan_end - 12, 4):
-        if u32(prx, row_off) not in (TYPE_REF_A, TYPE_REF_B):
+        if not is_ref_type(u32(prx, row_off)):
             continue
         name_id = u32(prx, row_off + 8)
         if not (0 <= name_id < len(strings)):
@@ -189,23 +195,34 @@ def parse_table(
         return []
     rows: list[Row] = []
     name_counts: dict[str, int] = {}
-    seen: set[int] = set()
     for i in range(count):
-        rel = signed32(u32(prx, table_offset + 8 + i * 4))
+        pointer_offset = table_offset + 8 + i * 4
+        rel = signed32(u32(prx, pointer_offset))
         row_off = table_offset + rel - 4
-        if row_off in seen:
-            continue
-        seen.add(row_off)
         type_id = u32(prx, row_off)
         value_raw = u32(prx, row_off + 4)
         name_id = u32(prx, row_off + 8)
         if not (0 <= name_id < len(strings)):
             continue
-        if type_id not in EDITABLE_TYPES and type_id not in (TYPE_REF_A, TYPE_REF_B):
+        if type_id not in EDITABLE_TYPES and not is_ref_type(type_id):
             continue
         name = strings[name_id]
         name_counts[name] = name_counts.get(name, 0) + 1
-        rows.append(Row(prx_name, group, table_offset, row_off, type_id, value_raw, name_id, name, name_counts[name]))
+        rows.append(
+            Row(
+                prx_name,
+                group,
+                table_offset,
+                i,
+                pointer_offset,
+                row_off,
+                type_id,
+                value_raw,
+                name_id,
+                name,
+                name_counts[name],
+            )
+        )
     return rows
 
 
@@ -221,7 +238,7 @@ def parse_rows(common: bytes | bytearray, prx_entry: dict, strings: list[str]) -
         table_rows = parse_table(prx_entry["name"], prx, strings, group, table_offset)
         rows.extend(table_rows)
         for row in table_rows:
-            if row.type_id not in (TYPE_REF_A, TYPE_REF_B):
+            if not is_ref_type(row.type_id):
                 continue
             target = row.row_offset + signed32(row.value_raw)
             if table_count_at(prx, target) is None and table_count_at(prx, target + 4) is not None:
@@ -244,7 +261,7 @@ def row_value_text(row: Row, strings: list[str]) -> str:
 def display_rows_by_offset(rows: list[Row]) -> list[Row]:
     unique: dict[tuple[int, str, str], Row] = {}
     for row in rows:
-        unique.setdefault((row.row_offset, row.type_name, row.key), row)
+        unique.setdefault((row.pointer_offset, row.type_name, row.key), row)
     return sorted(unique.values(), key=lambda item: (prx_display_group_name(item), item.table_offset, item.row_offset, item.name.lower()))
 
 
@@ -263,35 +280,35 @@ def prx_table_groups(rows: list[Row]) -> "OrderedDict[str, int]":
 
 def prx_root_toc_lines(roots: dict[str, int], rows: list[Row]) -> list[str]:
     lines: list[str] = [
-        "# Click on table names to view contents",
-        "[RootTables.PRXRoots]",
+        "# Click a table name to jump to its property block",
+        "[RootTables.PRXTables]",
     ]
-    seen_root_offsets: set[int] = set()
-    for name, off in sorted(roots.items(), key=lambda item: item[1]):
-        if off in seen_root_offsets:
-            continue
-        seen_root_offsets.add(off)
-        lines.append(f"@0x{off:04X} {name}")
+    tables: "OrderedDict[tuple[str, int], None]" = OrderedDict()
+    for row in display_rows_by_offset(rows):
+        tables.setdefault((row.group, row.table_offset), None)
+    for group, table_offset in tables:
+        lines.append(f"@0x{table_offset:04X} {group}")
     lines.append("")
-    tables = prx_table_groups(rows)
-    if tables:
-        lines.append("[RootTables.PRXTables]")
-        for group, table_offset in tables.items():
-            lines.append(f"@0x{table_offset:04X} {group}")
-        lines.append("")
     return lines
 
 
 def prx_rows_text_lines(rows: list[Row], strings: list[str]) -> list[str]:
-    lines: list[str] = ["[Rows]"]
-    current_group: str | None = None
+    lines: list[str] = ["[PropertySets]"]
+    current_table: tuple[str, int] | None = None
     for row in display_rows_by_offset(rows):
-        group = prx_display_group_name(row)
-        if group != current_group:
+        table = (row.group, row.table_offset)
+        if table != current_table:
+            if current_table is not None:
+                lines.append("}")
             lines.append("")
-            lines.append(f"## PRXTable 0x{row.table_offset:04X} {group}")
-            current_group = group
-        lines.append(f"@0x{row.row_offset:04X} {row.type_name:<10} {row.key} = {row_value_text(row, strings)}")
+            lines.append(f"property_set {row.group} {{  # table 0x{row.table_offset:04X}")
+            current_table = table
+        if is_ref_type(row.type_id):
+            lines.append(f"    ref {row.name} -> {row.group}.{row.name};")
+        else:
+            lines.append(f"    {row.type_name} {row.name}{'' if row.index == 1 else f'#{row.index}'} = {row_value_text(row, strings)};")
+    if current_table is not None:
+        lines.append("}")
     return lines
 
 

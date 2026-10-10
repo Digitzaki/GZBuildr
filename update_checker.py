@@ -10,7 +10,7 @@ from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
 
-APP_VERSION = "3.2.0"
+APP_VERSION = "3.5.0"
 REPOSITORY_URL = "https://github.com/Digitzaki/GZBuildr"
 LATEST_RELEASE_API = "https://api.github.com/repos/Digitzaki/GZBuildr/releases/latest"
 RELEASE_ASSET_NAME = "GZBuildr.exe"
@@ -18,7 +18,7 @@ USER_AGENT = f"GZBuildr/{APP_VERSION}"
 
 
 def _version_tuple(tag: str) -> tuple[int, ...] | None:
-    # Releases use tags such as GZ_3.0.2; plain 3.2.0 and v3.2.0 are valid too.
+    # Releases use tags such as GZ_3.5.0; plain 3.5.0 and v3.5.0 are valid too.
     match = re.search(r"(\d+(?:\.\d+)+)$", str(tag).strip(), flags=re.IGNORECASE)
     if not match:
         return None

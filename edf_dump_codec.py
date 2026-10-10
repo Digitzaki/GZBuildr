@@ -176,7 +176,6 @@ def append_blank(lines: list[str]) -> None:
 def dump_to_editable(data: bytes, names: dict[str, str]) -> str:
     text = data.decode("latin-1")
     lines = [
-        "; EDF_DUMP_CODEC v1",
         "; Edit the values in the far-right column. Keep bracketed short codes unless you know what you are doing.",
         "",
     ]
