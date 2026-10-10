@@ -1,0 +1,6 @@
+Pillow
+numpy
+ttkbootstrap
+tkinterdnd2
+moderngl
+glcontext
