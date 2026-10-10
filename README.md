@@ -23,16 +23,15 @@ A GUI tool for parsing, extracting, and rebuilding Wii/GameCube/PS2 bundle files
 ## Requirements (Source Installation)
 Download Executable Version (No Requirements): [GZBuildr 3.5.0!!](https://github.com/Digitzaki/GZBuildr/releases/tag/GZ_3.5.0)
 ### Python
-- Python 3.x
-- tkinter (usually included with Python)
+- Python 3.11+
 
-### Optional: Drag-and-Drop Support
-To enable drag-and-drop functionality:
+### Run the requirements.txt file for module installation.
+Open the terminal and locate the folder the source code is in. Normally you can right click inside the folder and launch terminal, but you can copy the path and do
 ```bash
-pip install tkinterdnd2
+cd <path>
+pip install -r requirements.txt
 ```
-
-If not installed, you can still use the Browse button to select files.
+Only the 2nd line is required, cd is if you open the terminal outside the source code folder.
 
 ## How to Use
 
